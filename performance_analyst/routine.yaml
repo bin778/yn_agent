@@ -1,0 +1,90 @@
+# 3. 정하준 (Performance Analyst)
+agent:
+  id: performance_analyst
+  display_name: '정하준'
+  role: '퍼포먼스 마케터'
+  soul_ref: './SOUL.md'
+  config_ref: './config.md'
+
+# ── 트리거 ──────────────────────────────────────────────
+triggers:
+  - type: schedule
+    name: daily_bid_review
+    cron: '30 8 * * *' # 매일 08:30 (KST), 전일 데이터 기준
+    task: run_bid_optimization
+    description: >
+      전일 Google Ads / Naver 성과 데이터를 조회하여 입찰/예산 조정안을 생성한다.
+
+  - type: event
+    name: on_tracking_alert
+    listen_to: 'data_assistant.critical_alert'
+    task: pause_recommendations
+    description: >
+      오지민이 Critical 이상을 발행하면, 해당 데이터 기반 신규 제안 생성을
+      일시 중단하고 기존 auto_apply_queue 항목도 재검토 대상으로 표시한다.
+
+# ── 실행 전 컨텍스트 로딩 순서 ─────────────────────────────
+pre_task_context:
+  - load: agent_memory.recent_history # 최근 제안/승인/반려 이력
+  - load: data_assistant.tracking_status # 데이터 신뢰도 먼저 확인
+  - load: knowledge/compliance_rules.md
+  - load: examples/few_shot_cases.md
+
+# ── 작업 실행 ──────────────────────────────────────────
+task: run_bid_optimization
+steps:
+  - step: check_tracking_status
+    rule: >
+      tracking_status == "Critical" → halt_task, notify: [data_assistant, dev_team]
+      tracking_status == "Warning" → proceed_with_caution_flag
+  - step: fetch_data
+    sources: [google_ads, naver_searchad]
+  - step: analyze
+    model_call: true
+    output_schema: performance_analyst_schema
+  - step: classify
+    rule: >
+      abs(adjustment_percentage) > 20 OR action == "PAUSE" → route_to: human_approval.queue
+      keyword.category in ["성범죄", "미성년자"] → route_to: compliance_review.queue (병행)
+      else → route_to: auto_apply_queue
+  - step: record
+    write_to: [agent_memory, audit_log]
+
+# ── Handoff ────────────────────────────────────────────
+handoff:
+  default_target: human_approval.queue # 보수적 기본값
+  conditional:
+    - condition: "abs(adjustment_percentage) <= 20 and action != 'PAUSE' and not sensitive_keyword"
+      target: auto_apply_queue
+      note: '자동 반영 대기열이라도 실제 반영은 사람의 최종 확인 후 실행됨.'
+    - condition: 'sensitive_keyword == true'
+      target: compliance_review.queue
+      note: '조정폭과 무관하게 병행 등록. human_approval.queue와 별도로 법무 확인 필요.'
+
+# ── 에스컬레이션 ────────────────────────────────────────
+escalation:
+  - trigger: '동일 캠페인 human_approval 반려 3회 연속'
+    notify: ['marketing_lead']
+    channel: 'kakaowork:#ai-performance-alert'
+    message_template: >
+      [정하준] {campaign} 캠페인 제안이 연속 반려됨. 전략 재검토 필요.
+
+  - trigger: 'tracking_status == Critical 상태에서 제안 요청 발생'
+    notify: ['data_assistant', 'dev_team']
+    channel: 'slack:#ai-agent-errors'
+    action: 'halt_current_batch'
+
+  - trigger: '민감 키워드 조정 제안 >= 3건 (지난 24시간)'
+    notify: ['legal_compliance']
+    channel: 'kakaowork:#ai-compliance-alert'
+
+# ── 실패/재시도 정책 ──────────────────────────────────────
+retry_policy:
+  schema_validation_fail: 2
+  api_fetch_fail: 3
+  backoff: exponential
+
+# ── 감사 로그 ─────────────────────────────────────────
+audit:
+  log_every_run: true
+  fields: [timestamp, model_version, prompt_version, keyword, adjustment_percentage, action, routed_to]

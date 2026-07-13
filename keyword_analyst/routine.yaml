@@ -1,0 +1,83 @@
+# 1. 서연우 (Keyword Analyst)
+agent:
+  id: keyword_analyst
+  display_name: '서연우'
+  role: '키워드 분석가'
+  soul_ref: './SOUL.md'
+  config_ref: './config.md'
+
+# ── 트리거: 이 직원이 "언제" 스스로 일을 시작하는지 ──────────────
+triggers:
+  - type: schedule
+    name: daily_keyword_scan
+    cron: '0 9 * * *' # 매일 09:00 (KST)
+    task: run_daily_keyword_scan
+    description: >
+      전일 GA4/Naver/Google 데이터를 조회하여 신규 키워드 후보를 발굴하고
+      urgency_level, compliance_risk를 판정한다.
+
+  - type: event
+    name: on_demand_lookup
+    listen_to: 'content_editor.needs_keyword'
+    task: run_on_demand_lookup
+    description: >
+      한도윤(content_editor)이 특정 주제에 대한 추가 키워드가 필요할 때
+      요청하면 즉시 실행한다. 스케줄과 무관하게 event-driven.
+
+# ── 실행 전 컨텍스트 로딩 순서 ─────────────────────────────────
+pre_task_context:
+  - load: agent_memory.recent_history # 최근 7일 제출/반려 이력
+  - load: knowledge/compliance_rules.md
+  - load: knowledge/domain_glossary.md
+  - load: examples/few_shot_cases.md
+
+# ── 작업 실행 ──────────────────────────────────────────────
+task: run_daily_keyword_scan
+steps:
+  - step: fetch_data
+    sources: [ga4, naver_searchad, google_ads]
+  - step: analyze
+    model_call: true
+    output_schema: keyword_analyst_schema # SOUL.md/프롬프트에 정의된 JSON 스키마
+  - step: classify
+    rule: >
+      compliance_risk == "high" → route_to: compliance_review.queue
+      compliance_risk != "high" → route_to: content_editor.inbox
+  - step: record
+    write_to: [agent_memory, audit_log]
+
+# ── Handoff: 작업 완료 후 어디로 넘기는지 ─────────────────────
+handoff:
+  default_target: content_editor.inbox
+  conditional:
+    - condition: "compliance_risk == 'high'"
+      target: compliance_review.queue
+      note: 'content_editor로 자동 전달되지 않음. 사람 검토 후에만 다음 단계 진행.'
+
+# ── 에스컬레이션: 막혔을 때 누구에게 어떻게 알리는지 ─────────────
+escalation:
+  - trigger: 'compliance_risk high 건수 >= 3 (지난 24시간)'
+    notify: ['marketing_lead', 'legal_compliance']
+    channel: 'kakaowork:#ai-compliance-alert'
+    message_template: >
+      [서연우] 오늘 high-risk 키워드 {count}건 발견. 검토 필요: {queue_link}
+
+  - trigger: 'schema_parse_fail_count >= 3 (연속)'
+    notify: ['dev_team']
+    channel: 'slack:#ai-agent-errors'
+    action: 'halt_current_batch'
+
+  - trigger: 'input_source_unresponsive > 24h'
+    notify: ['dev_team', 'data_assistant']
+    channel: 'slack:#ai-agent-errors'
+
+# ── 실패/재시도 정책 ────────────────────────────────────────
+retry_policy:
+  schema_validation_fail: 2
+  api_fetch_fail: 3
+  backoff: exponential
+
+# ── 감사 로그 ─────────────────────────────────────────────
+audit:
+  log_every_run: true
+  fields: [timestamp, model_version, prompt_version, input_summary, output_summary, routed_to]

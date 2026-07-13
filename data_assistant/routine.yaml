@@ -1,0 +1,84 @@
+# 4. 오지민 (Data Assistant)
+agent:
+  id: data_assistant
+  display_name: '오지민'
+  role: '데이터 분석가'
+  soul_ref: './SOUL.md'
+  config_ref: './config.md'
+
+# ── 트리거: 다른 3명과 달리 상시에 가까운 주기 ──────────────
+triggers:
+  - type: schedule
+    name: continuous_tracking_check
+    cron: '*/30 * * * *' # 30분마다 (다른 직원들은 일 1~2회, 여기는 상시 감시가 핵심)
+    task: run_anomaly_check
+    description: >
+      GA4/GTM 이벤트를 확인하여 핵심 전환 이벤트 이상 여부를 판정한다.
+      다른 세 직원의 판단이 이 데이터 위에서 이루어지므로 지연 없이 돈다.
+
+# ── 실행 전 컨텍스트 로딩 순서 ─────────────────────────────
+pre_task_context:
+  - load: agent_memory.recent_anomalies # 최근 이상탐지 이력 (재발 여부 확인용)
+
+# ── 작업 실행 ──────────────────────────────────────────
+task: run_anomaly_check
+steps:
+  - step: fetch_data
+    sources: [ga4_events, gtm_status]
+  - step: mask_pii
+    description: >
+      IP/기기ID/User-Agent 등 식별 가능 필드는 집계 단위로 변환 후 원본 폐기.
+      마스킹 불가능한 형태로 존재할 경우 privacy_flags에 기록.
+  - step: analyze
+    model_call: true
+    output_schema: data_assistant_schema
+  - step: classify
+    rule: >
+      status_summary == "Critical" → route_to: broadcast.all_agents + dev_team.queue
+      status_summary == "Warning" → route_to: data_assistant.tracking_status (기록만, 브로드캐스트 안 함)
+      status_summary == "Normal" → route_to: data_assistant.tracking_status
+  - step: record
+    write_to: [agent_memory, audit_log]
+
+# ── Handoff ────────────────────────────────────────────
+handoff:
+  default_target: data_assistant.tracking_status # 모든 직원이 조회 가능한 상태값으로 항상 갱신
+  conditional:
+    - condition: "status_summary == 'Critical'"
+      target: broadcast.all_agents
+      note: >
+        서연우/한도윤/정하준에게 즉시 전달. 수신 측은 해당 데이터 기반 작업을
+        일시 보류하거나 caution_flag를 달고 진행해야 함 (각 직원 routine.yaml 참조).
+    - condition: 'privacy_flags != []'
+      target: dev_team.queue
+      note: 'ETL 파이프라인 단계에서 마스킹이 누락된 것으로 추정. 원본 데이터 소스 점검 필요.'
+
+# ── 에스컬레이션 ────────────────────────────────────────
+escalation:
+  - trigger: 'status_summary == Critical'
+    notify: ['keyword_analyst', 'content_editor', 'performance_analyst', 'dev_team']
+    channel: 'slack:#ai-agent-errors'
+    message_template: >
+      [오지민] Critical 이상 감지: {issue_type}. {description}
+      영향받는 직원은 해당 데이터 기반 작업을 일시 보류하세요.
+
+  - trigger: 'privacy_flags != []'
+    notify: ['dev_team']
+    channel: 'slack:#ai-agent-errors'
+    action: 'flag_etl_pipeline_review'
+
+  - trigger: 'schema_parse_fail_count >= 3 (연속)'
+    notify: ['dev_team']
+    channel: 'slack:#ai-agent-errors'
+    action: 'halt_current_batch'
+
+# ── 실패/재시도 정책 ──────────────────────────────────────
+retry_policy:
+  schema_validation_fail: 2
+  api_fetch_fail: 3
+  backoff: exponential
+
+# ── 감사 로그 ─────────────────────────────────────────
+audit:
+  log_every_run: true
+  fields: [timestamp, model_version, prompt_version, status_summary, anomaly_count, privacy_flags, routed_to]

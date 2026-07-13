@@ -1,0 +1,89 @@
+# 2. 한도윤 (Content Editor)
+agent:
+  id: content_editor
+  display_name: '한도윤'
+  role: '콘텐츠 에디터'
+  soul_ref: './SOUL.md'
+  config_ref: './config.md'
+
+# ── 트리거 ──────────────────────────────────────────────
+triggers:
+  - type: event
+    name: on_new_keyword
+    listen_to: 'keyword_analyst.content_editor.inbox'
+    task: draft_content
+    description: >
+      서연우가 승인된 키워드를 넘기면 즉시 초안 작성을 시작한다.
+      스케줄이 아니라 큐 적재 기반 event-driven.
+
+  - type: schedule
+    name: backlog_sweep
+    cron: '0 10,15 * * *' # 하루 2회, 큐에 쌓인 미처리 항목 재확인
+    task: process_backlog
+    description: >
+      이벤트를 놓쳤거나 실패한 항목이 큐에 남아있는지 확인 후 재시도.
+
+# ── 실행 전 컨텍스트 로딩 순서 ─────────────────────────────
+pre_task_context:
+  - load: agent_memory.recent_rejections # 최근 반려된 콘텐츠 및 사유
+  - load: knowledge/compliance_rules.md
+  - load: knowledge/domain_glossary.md
+  - load: examples/few_shot_cases.md
+
+# ── 작업 실행 ──────────────────────────────────────────
+task: draft_content
+steps:
+  - step: fetch_keyword
+    source: content_editor.inbox
+  - step: draft
+    model_call: true
+    output_schema: content_editor_schema
+  - step: self_flag
+    description: >
+      결과 보장 표현·긴급성 조장 문구·미검증 판례 여부를 스스로 점검하여
+      flagged_claims 필드에 기록한다. (최종 판정은 사람이 한다 — 셀프 승인 없음)
+  - step: classify
+    rule: >
+      flagged_claims가 비어있지 않음 → route_to: human_review.queue
+      본문에 형량/합의금 구체 언급 → route_to: human_review.queue
+      위 조건 모두 미해당 → route_to: publish_queue (발행은 별도 승인 후 실행)
+  - step: record
+    write_to: [agent_memory, audit_log]
+
+# ── Handoff ────────────────────────────────────────────
+handoff:
+  default_target: human_review.queue # 기본값은 항상 사람 검토 (보수적으로 설정)
+  conditional:
+    - condition: 'flagged_claims == [] and no_sensitive_terms'
+      target: publish_queue
+      note: '이 경우도 실제 발행은 발행 담당자의 최종 승인이 있어야 실행됨.'
+
+# ── 에스컬레이션 ────────────────────────────────────────
+escalation:
+  - trigger: 'human_review 반려율 >= 30% (최근 7일)'
+    notify: ['marketing_lead']
+    channel: 'kakaowork:#ai-content-alert'
+    message_template: >
+      [한도윤] 최근 7일 반려율 {rate}%. 프롬프트/knowledge 점검 필요.
+
+  - trigger: 'schema_parse_fail_count >= 3 (연속)'
+    notify: ['dev_team']
+    channel: 'slack:#ai-agent-errors'
+    action: 'halt_current_batch'
+
+  - trigger: '동일 flagged_claims 사유 >= 5회 반복 (7일 내)'
+    notify: ['legal_compliance']
+    channel: 'kakaowork:#ai-compliance-alert'
+    message_template: >
+      [한도윤] "{reason}" 사유로 반복 플래그 발생. knowledge base 갱신 검토 요청.
+
+# ── 실패/재시도 정책 ──────────────────────────────────────
+retry_policy:
+  schema_validation_fail: 2
+  queue_fetch_fail: 3
+  backoff: exponential
+
+# ── 감사 로그 ─────────────────────────────────────────
+audit:
+  log_every_run: true
+  fields: [timestamp, model_version, prompt_version, source_keyword, flagged_claims, routed_to]
