@@ -6,7 +6,6 @@ agent:
   soul_ref: './SOUL.md'
   config_ref: './config.md'
 
-# ── 트리거: 이 직원이 "언제" 스스로 일을 시작하는지 ──────────────
 triggers:
   - type: schedule
     name: daily_keyword_scan
@@ -24,14 +23,12 @@ triggers:
       한도윤(content_editor)이 특정 주제에 대한 추가 키워드가 필요할 때
       요청하면 즉시 실행한다. 스케줄과 무관하게 event-driven.
 
-# ── 실행 전 컨텍스트 로딩 순서 ─────────────────────────────────
 pre_task_context:
   - load: agent_memory.recent_history # 최근 7일 제출/반려 이력
   - load: knowledge/compliance_rules.md
   - load: knowledge/domain_glossary.md
   - load: examples/few_shot_cases.md
 
-# ── 작업 실행 ──────────────────────────────────────────────
 task: run_daily_keyword_scan
 steps:
   - step: fetch_data
@@ -46,7 +43,6 @@ steps:
   - step: record
     write_to: [agent_memory, audit_log]
 
-# ── Handoff: 작업 완료 후 어디로 넘기는지 ─────────────────────
 handoff:
   default_target: content_editor.inbox
   conditional:
@@ -54,30 +50,44 @@ handoff:
       target: compliance_review.queue
       note: 'content_editor로 자동 전달되지 않음. 사람 검토 후에만 다음 단계 진행.'
 
-# ── 에스컬레이션: 막혔을 때 누구에게 어떻게 알리는지 ─────────────
 escalation:
   - trigger: 'compliance_risk high 건수 >= 3 (지난 24시간)'
     notify: ['marketing_lead', 'legal_compliance']
-    channel: 'kakaowork:#ai-compliance-alert'
+    channel: 'discord:#컴플라이언스-검토'
     message_template: >
       [서연우] 오늘 high-risk 키워드 {count}건 발견. 검토 필요: {queue_link}
 
   - trigger: 'schema_parse_fail_count >= 3 (연속)'
     notify: ['dev_team']
-    channel: 'slack:#ai-agent-errors'
+    channel: 'discord:#개발팀-에러알림'
     action: 'halt_current_batch'
 
   - trigger: 'input_source_unresponsive > 24h'
-    notify: ['dev_team', 'data_assistant']
-    channel: 'slack:#ai-agent-errors'
+    notify: ['dev_team']
+    channel: 'discord:#개발팀-에러알림'
+    message_template: >
+      [서연우] 입력 소스({source}) 24시간 이상 무응답. 오지민 상태값도 함께 확인 요망.
 
-# ── 실패/재시도 정책 ────────────────────────────────────────
 retry_policy:
   schema_validation_fail: 2
   api_fetch_fail: 3
   backoff: exponential
 
-# ── 감사 로그 ─────────────────────────────────────────────
 audit:
   log_every_run: true
   fields: [timestamp, model_version, prompt_version, input_summary, output_summary, routed_to]
+
+interface:
+  type: discord
+  approval_method: 'button' # button | reaction
+  channels:
+    default:
+      queue_ref: 'content_editor.inbox'
+      discord_channel_name: '#서연우-키워드큐'
+    high_risk:
+      queue_ref: 'compliance_review.queue'
+      discord_channel_name: '#컴플라이언스-검토'
+  message_style:
+    embed: true
+    include_fields: [keyword, urgency_level, compliance_risk, reason]
+    include_audit_ref: true # DB record ID를 embed footer에 포함 (추적용)

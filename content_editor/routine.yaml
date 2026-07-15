@@ -6,7 +6,6 @@ agent:
   soul_ref: './SOUL.md'
   config_ref: './config.md'
 
-# ── 트리거 ──────────────────────────────────────────────
 triggers:
   - type: event
     name: on_new_keyword
@@ -23,14 +22,12 @@ triggers:
     description: >
       이벤트를 놓쳤거나 실패한 항목이 큐에 남아있는지 확인 후 재시도.
 
-# ── 실행 전 컨텍스트 로딩 순서 ─────────────────────────────
 pre_task_context:
   - load: agent_memory.recent_rejections # 최근 반려된 콘텐츠 및 사유
   - load: knowledge/compliance_rules.md
   - load: knowledge/domain_glossary.md
   - load: examples/few_shot_cases.md
 
-# ── 작업 실행 ──────────────────────────────────────────
 task: draft_content
 steps:
   - step: fetch_keyword
@@ -50,7 +47,6 @@ steps:
   - step: record
     write_to: [agent_memory, audit_log]
 
-# ── Handoff ────────────────────────────────────────────
 handoff:
   default_target: human_review.queue # 기본값은 항상 사람 검토 (보수적으로 설정)
   conditional:
@@ -58,32 +54,45 @@ handoff:
       target: publish_queue
       note: '이 경우도 실제 발행은 발행 담당자의 최종 승인이 있어야 실행됨.'
 
-# ── 에스컬레이션 ────────────────────────────────────────
 escalation:
   - trigger: 'human_review 반려율 >= 30% (최근 7일)'
     notify: ['marketing_lead']
-    channel: 'kakaowork:#ai-content-alert'
+    channel: 'discord:#패턴경고'
     message_template: >
       [한도윤] 최근 7일 반려율 {rate}%. 프롬프트/knowledge 점검 필요.
 
   - trigger: 'schema_parse_fail_count >= 3 (연속)'
     notify: ['dev_team']
-    channel: 'slack:#ai-agent-errors'
+    channel: 'discord:#개발팀-에러알림'
     action: 'halt_current_batch'
 
   - trigger: '동일 flagged_claims 사유 >= 5회 반복 (7일 내)'
     notify: ['legal_compliance']
-    channel: 'kakaowork:#ai-compliance-alert'
+    channel: 'discord:#컴플라이언스-검토'
     message_template: >
       [한도윤] "{reason}" 사유로 반복 플래그 발생. knowledge base 갱신 검토 요청.
 
-# ── 실패/재시도 정책 ──────────────────────────────────────
 retry_policy:
   schema_validation_fail: 2
   queue_fetch_fail: 3
   backoff: exponential
 
-# ── 감사 로그 ─────────────────────────────────────────
 audit:
   log_every_run: true
   fields: [timestamp, model_version, prompt_version, source_keyword, flagged_claims, routed_to]
+
+interface:
+  type: discord
+  approval_method: 'button'
+  channels:
+    default:
+      queue_ref: 'human_review.queue'
+      discord_channel_name: '#콘텐츠-검수대기'
+    auto_eligible:
+      queue_ref: 'publish_queue'
+      discord_channel_name: '#발행대기'
+  message_style:
+    embed: true
+    include_fields: [title, hook, flagged_claims, target_keyword]
+    include_audit_ref: true
+    truncate_body_preview: 500 # 본문 전체는 링크로, 미리보기만 embed에
