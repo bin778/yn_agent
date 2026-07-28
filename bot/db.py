@@ -33,6 +33,15 @@ def get_conn():
             routed_to TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tracking_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            status TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            record_id INTEGER,
+            output_json TEXT NOT NULL
+        )
+    """)
     return conn
 
 
@@ -155,3 +164,38 @@ def list_approved_keywords_awaiting_draft(limit: int = 10) -> list[dict]:
             if len(pending) >= limit:
                 break
     return pending
+
+
+def upsert_tracking_status(status: str, output: dict, record_id: int) -> None:
+    """오지민이 매 실행마다 갱신. 정하준은 get_tracking_status()로 조회."""
+    conn = get_conn()
+    now = datetime.datetime.utcnow().isoformat()
+    conn.execute(
+        """INSERT INTO tracking_status (id, status, updated_at, record_id, output_json)
+           VALUES (1, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             status=excluded.status,
+             updated_at=excluded.updated_at,
+             record_id=excluded.record_id,
+             output_json=excluded.output_json""",
+        (status, now, record_id, json.dumps(output, ensure_ascii=False)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_tracking_status() -> dict | None:
+    """정하준 pre_task: data_assistant.tracking_status 조회."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT status, updated_at, record_id, output_json FROM tracking_status WHERE id=1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "status": row[0],
+        "updated_at": row[1],
+        "record_id": row[2],
+        "output": json.loads(row[3]),
+    }

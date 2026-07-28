@@ -36,3 +36,26 @@ class ContentEditorOutput(BaseModel):
         description="형량/합의금 구체 언급, 미성년자·피해자 관점, 신규 판례·법개정 등. 없으면 빈 배열",
     )
     reason: str = Field(description="플래그/톤 선택에 대한 짧은 근거")
+
+
+class DataAssistantOutput(BaseModel):
+    """오지민(data_assistant) 이상탐지 출력. routine.yaml data_assistant_schema."""
+
+    status_summary: Literal["Normal", "Warning", "Critical"]
+    tracking_anomalies: List[str] = Field(
+        default_factory=list,
+        description="관찰된 이상 목록 (집계 단위로만 서술, 개인 특정 금지)",
+    )
+    action_items: List[str] = Field(
+        default_factory=list,
+        description="실행 가능한 다음 조치",
+    )
+    privacy_flags: List[str] = Field(
+        default_factory=list,
+        description="미마스킹 PII 등. 없으면 빈 배열. 원문 IP/기기ID는 절대 포함하지 말 것",
+    )
+    suspected_layer: str = Field(
+        default="",
+        description="원인 후보 단계: GTM / ETL / GA4 / unknown 등",
+    )
+    reason: str = Field(description="사실 → 판단 → 다음 행동 요약")

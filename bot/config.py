@@ -30,6 +30,9 @@ DISCORD_CHANNEL_KEYWORD_QUEUE = os.getenv("DISCORD_CHANNEL_KEYWORD_QUEUE")      
 DISCORD_CHANNEL_COMPLIANCE_REVIEW = os.getenv("DISCORD_CHANNEL_COMPLIANCE_REVIEW")  # #컴플라이언스-검토
 DISCORD_CHANNEL_HUMAN_REVIEW = os.getenv("DISCORD_CHANNEL_HUMAN_REVIEW")        # #콘텐츠-검수대기
 DISCORD_CHANNEL_PUBLISH = os.getenv("DISCORD_CHANNEL_PUBLISH")                  # #발행대기
+DISCORD_CHANNEL_TRACKING_STATUS = os.getenv("DISCORD_CHANNEL_TRACKING_STATUS")  # #오지민-트래킹상태
+DISCORD_CHANNEL_BROADCAST = os.getenv("DISCORD_CHANNEL_BROADCAST")              # #전체-긴급알림
+DISCORD_CHANNEL_DEV_TEAM = os.getenv("DISCORD_CHANNEL_DEV_TEAM")                # #개발팀-에러알림
 
 # ── DB ──────────────────────────────────────────────
 DB_PATH = BOT_DIR / "hermes.db"
@@ -55,3 +58,9 @@ def check_required_env():
         print("[WARN] DISCORD_CHANNEL_HUMAN_REVIEW 미설정 — 해당 채널로는 게시되지 않습니다.")
     if not DISCORD_CHANNEL_PUBLISH:
         print("[WARN] DISCORD_CHANNEL_PUBLISH 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_TRACKING_STATUS:
+        print("[WARN] DISCORD_CHANNEL_TRACKING_STATUS 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_BROADCAST:
+        print("[WARN] DISCORD_CHANNEL_BROADCAST 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_DEV_TEAM:
+        print("[WARN] DISCORD_CHANNEL_DEV_TEAM 미설정 — 해당 채널로는 게시되지 않습니다.")

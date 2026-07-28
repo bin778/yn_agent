@@ -11,6 +11,9 @@ from .config import (
     DISCORD_CHANNEL_COMPLIANCE_REVIEW,
     DISCORD_CHANNEL_HUMAN_REVIEW,
     DISCORD_CHANNEL_PUBLISH,
+    DISCORD_CHANNEL_TRACKING_STATUS,
+    DISCORD_CHANNEL_BROADCAST,
+    DISCORD_CHANNEL_DEV_TEAM,
 )
 from .db import record_decision
 
@@ -19,6 +22,9 @@ CHANNEL_MAP = {
     "compliance_review.queue": DISCORD_CHANNEL_COMPLIANCE_REVIEW,
     "human_review.queue": DISCORD_CHANNEL_HUMAN_REVIEW,
     "publish_queue": DISCORD_CHANNEL_PUBLISH,
+    "data_assistant.tracking_status": DISCORD_CHANNEL_TRACKING_STATUS,
+    "broadcast.all_agents": DISCORD_CHANNEL_BROADCAST,
+    "dev_team.queue": DISCORD_CHANNEL_DEV_TEAM,
 }
 
 BODY_PREVIEW_LIMIT = 500
@@ -114,7 +120,43 @@ def build_content_embed(item, target: str, record_id: int) -> discord.Embed:
     return embed
 
 
-async def _post_to_channel(client: discord.Client, target: str, embed: discord.Embed, view: discord.ui.View):
+def build_tracking_embed(item, target: str, record_id: int, scenario: str = "") -> discord.Embed:
+    colors = {
+        "Critical": discord.Color.red(),
+        "Warning": discord.Color.orange(),
+        "Normal": discord.Color.green(),
+    }
+    embed = discord.Embed(
+        title=f"📡 트래킹 상태: {item.status_summary}",
+        description=item.reason,
+        color=colors.get(item.status_summary, discord.Color.greyple()),
+    )
+    if scenario:
+        embed.add_field(name="시나리오", value=scenario, inline=True)
+    embed.add_field(name="의심 레이어", value=item.suspected_layer or "-", inline=True)
+    embed.add_field(name="게시 큐", value=target, inline=True)
+
+    if item.tracking_anomalies:
+        anomalies = "\n".join(f"• {a}" for a in item.tracking_anomalies)
+        embed.add_field(name="이상 징후", value=anomalies, inline=False)
+    if item.action_items:
+        actions = "\n".join(f"• {a}" for a in item.action_items)
+        embed.add_field(name="다음 조치", value=actions, inline=False)
+    if item.privacy_flags:
+        privacy = "\n".join(f"• {p}" for p in item.privacy_flags)
+        embed.add_field(name="🔒 privacy_flags", value=privacy, inline=False)
+
+    embed.set_footer(text=f"오지민 · record #{record_id} · routed_to: {target}")
+    return embed
+
+
+async def _post_to_channel(
+    client: discord.Client,
+    target: str,
+    embed: discord.Embed,
+    view: discord.ui.View | None = None,
+    content: str | None = None,
+):
     channel_id = CHANNEL_MAP.get(target)
     if not channel_id:
         print(f"[WARN] '{target}'에 매핑된 채널ID가 없습니다. .env를 확인하세요.")
@@ -123,7 +165,12 @@ async def _post_to_channel(client: discord.Client, target: str, embed: discord.E
     if channel is None:
         print(f"[WARN] 채널(id={channel_id})을 찾을 수 없습니다. 봇이 해당 채널에 접근 권한이 있는지 확인하세요.")
         return
-    await channel.send(embed=embed, view=view)
+    kwargs = {"embed": embed}
+    if view is not None:
+        kwargs["view"] = view
+    if content:
+        kwargs["content"] = content
+    await channel.send(**kwargs)
 
 
 async def post_keyword_result(client: discord.Client, result: dict):
@@ -139,3 +186,39 @@ async def post_content_result(client: discord.Client, result: dict):
     embed = build_content_embed(result["item"], result["target"], result["record_id"])
     view = ApprovalView(result["record_id"], handoff=None)
     await _post_to_channel(client, result["target"], embed, view)
+
+
+async def post_data_assistant_result(client: discord.Client, result: dict):
+    """
+    오지민은 승인 버튼 없음 (알림 전용).
+    Normal → Discord 게시 안 함 (DB tracking_status만 갱신됨).
+    Warning → tracking_status 채널
+    Critical → broadcast (+ dev_team은 targets에 있으면 별도 게시)
+    privacy → dev_team
+    """
+    item = result["item"]
+    record_id = result["record_id"]
+    scenario = result.get("scenario", "")
+    targets = result.get("targets") or []
+
+    discord_targets = []
+    for t in targets:
+        if t == "data_assistant.tracking_status":
+            # Critical은 broadcast로 충분히 보이므로 tracking 채널은 Warning만
+            if item.status_summary == "Warning":
+                discord_targets.append(t)
+            elif item.status_summary == "Critical":
+                pass  # broadcast로 대체
+            # Normal: 조용히
+        elif t in ("broadcast.all_agents", "dev_team.queue"):
+            discord_targets.append(t)
+
+    if not discord_targets:
+        print(f"[오지민] status={item.status_summary} — Discord 게시 생략 (DB만 갱신, record #{record_id})")
+        return
+
+    for target in discord_targets:
+        embed = build_tracking_embed(item, target, record_id, scenario=scenario)
+        content = "@here" if target == "broadcast.all_agents" else None
+        await _post_to_channel(client, target, embed, view=None, content=content)
+
