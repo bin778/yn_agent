@@ -77,3 +77,81 @@ def recent_history(agent_id: str, limit: int = 5) -> list[tuple]:
     ).fetchall()
     conn.close()
     return rows
+
+
+def get_record(record_id: int) -> dict | None:
+    """agent_memory 단건 조회. 없으면 None."""
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT id, agent_id, created_at, output_json, routed_to, human_decision
+           FROM agent_memory WHERE id=?""",
+        (record_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "agent_id": row[1],
+        "created_at": row[2],
+        "output": json.loads(row[3]),
+        "routed_to": row[4],
+        "human_decision": row[5],
+    }
+
+
+def recent_rejections(agent_id: str, limit: int = 5) -> list[tuple]:
+    """한도윤 pre_task: 최근 반려된 콘텐츠 및 사유."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT created_at, output_json, routed_to, human_decision
+           FROM agent_memory
+           WHERE agent_id=? AND human_decision='rejected'
+           ORDER BY id DESC LIMIT ?""",
+        (agent_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def list_approved_keywords_awaiting_draft(limit: int = 10) -> list[dict]:
+    """
+    content_editor.inbox로 라우팅되어 승인됐지만,
+    아직 한도윤이 같은 키워드로 초안을 만들지 않은 항목.
+    """
+    conn = get_conn()
+    drafted_rows = conn.execute(
+        """SELECT output_json FROM agent_memory WHERE agent_id='content_editor'"""
+    ).fetchall()
+    drafted_keywords = set()
+    for (output_json,) in drafted_rows:
+        try:
+            drafted_keywords.add(json.loads(output_json).get("target_keyword", ""))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    rows = conn.execute(
+        """SELECT id, output_json, routed_to
+           FROM agent_memory
+           WHERE agent_id='keyword_analyst'
+             AND routed_to='content_editor.inbox'
+             AND human_decision='approved'
+           ORDER BY id ASC""",
+    ).fetchall()
+    conn.close()
+
+    pending = []
+    for record_id, output_json, routed_to in rows:
+        output = json.loads(output_json)
+        keyword = output.get("keyword", "")
+        if keyword and keyword not in drafted_keywords:
+            pending.append(
+                {
+                    "id": record_id,
+                    "output": output,
+                    "routed_to": routed_to,
+                }
+            )
+            if len(pending) >= limit:
+                break
+    return pending

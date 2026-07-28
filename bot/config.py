@@ -28,6 +28,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # ── Discord 채널 ID (queues.md 기준, 미설정이면 콘솔 경고 후 스킵) ──
 DISCORD_CHANNEL_KEYWORD_QUEUE = os.getenv("DISCORD_CHANNEL_KEYWORD_QUEUE")       # #서연우-키워드큐
 DISCORD_CHANNEL_COMPLIANCE_REVIEW = os.getenv("DISCORD_CHANNEL_COMPLIANCE_REVIEW")  # #컴플라이언스-검토
+DISCORD_CHANNEL_HUMAN_REVIEW = os.getenv("DISCORD_CHANNEL_HUMAN_REVIEW")        # #콘텐츠-검수대기
+DISCORD_CHANNEL_PUBLISH = os.getenv("DISCORD_CHANNEL_PUBLISH")                  # #발행대기
 
 # ── DB ──────────────────────────────────────────────
 DB_PATH = BOT_DIR / "hermes.db"
@@ -49,3 +51,7 @@ def check_required_env():
         print("[WARN] DISCORD_CHANNEL_KEYWORD_QUEUE 미설정 — 해당 채널로는 게시되지 않습니다.")
     if not DISCORD_CHANNEL_COMPLIANCE_REVIEW:
         print("[WARN] DISCORD_CHANNEL_COMPLIANCE_REVIEW 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_HUMAN_REVIEW:
+        print("[WARN] DISCORD_CHANNEL_HUMAN_REVIEW 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_PUBLISH:
+        print("[WARN] DISCORD_CHANNEL_PUBLISH 미설정 — 해당 채널로는 게시되지 않습니다.")

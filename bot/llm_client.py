@@ -48,6 +48,6 @@ def call_gemini_structured(
 
         except (ValidationError, ValueError) as e:
             last_error = e
-            print(f"[서연우][재시도 {attempt + 1}/{max_retries}] 스키마 검증 실패: {e}")
+            print(f"[LLM][재시도 {attempt + 1}/{max_retries}] 스키마 검증 실패: {e}")
 
     raise SchemaParseError(f"스키마 검증 {max_retries}회 재시도 후에도 실패: {last_error}")
