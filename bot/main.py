@@ -1,12 +1,12 @@
 """
-Hermes AI Bot — 서연우 + 한도윤 + 오지민.
+Hermes AI Bot — 서연우 + 한도윤 + 오지민 + 정하준 (4명 파일럿).
 
 실행: (yn_agent/ 에서) python -m bot.main
-필요: ~/.hermes/.env 채널 ID (키워드/컴플라이언스/검수/발행/트래킹/긴급/개발팀)
 
 - 서연우: 매일 09:00 + /run_keyword_scan
 - 한도윤: 키워드 승인 시 초안 + /run_content_draft + 10:00·15:00 백로그
-- 오지민: 30분마다 + /run_anomaly_check (scenario: critical/warning/normal/privacy)
+- 오지민: 30분마다 + /run_anomaly_check
+- 정하준: 매일 08:30 + /run_bid_review (tracking Critical이면 보류)
 """
 import asyncio
 
@@ -20,7 +20,13 @@ from .config import DISCORD_BOT_TOKEN, check_required_env
 from .agents.keyword_analyst import run_daily_keyword_scan
 from .agents.content_editor import process_backlog
 from .agents.data_assistant import run_anomaly_check
-from .discord_ui import post_keyword_result, post_content_result, post_data_assistant_result
+from .agents.performance_analyst import run_bid_optimization
+from .discord_ui import (
+    post_keyword_result,
+    post_content_result,
+    post_data_assistant_result,
+    post_performance_result,
+)
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -67,6 +73,24 @@ async def execute_anomaly_check(scenario: str = "critical"):
     return result
 
 
+async def execute_bid_review(tracking_override: str | None = None):
+    print(f"[정하준] 입찰 검토 시작 (tracking_override={tracking_override})")
+    try:
+        batch = await asyncio.to_thread(run_bid_optimization, tracking_override)
+    except Exception as e:
+        print(f"[정하준][ERROR] 입찰 검토 실패: {e}")
+        return None
+    await post_performance_result(bot, batch)
+    if batch.get("halted"):
+        print(f"[정하준] 보류 (Critical) record=#{batch.get('record_id')}")
+    else:
+        print(
+            f"[정하준] {len(batch.get('results', []))}건 제안 완료 "
+            f"(tracking={batch.get('tracking_status')}, caution={batch.get('caution')})"
+        )
+    return batch
+
+
 @bot.event
 async def on_ready():
     print(f"[Hermes] {bot.user} 로그인 완료. 서버: {[g.name for g in bot.guilds]}")
@@ -76,7 +100,6 @@ async def on_ready():
     if not scheduler.get_job("content_backlog_sweep"):
         scheduler.add_job(execute_content_backlog, "cron", hour="10,15", minute=0, id="content_backlog_sweep")
     if not scheduler.get_job("tracking_check"):
-        # routine.yaml: */30 * * * * — 스케줄은 critical 시연 데이터 사용
         scheduler.add_job(
             execute_anomaly_check,
             "cron",
@@ -84,9 +107,12 @@ async def on_ready():
             id="tracking_check",
             kwargs={"scenario": "critical"},
         )
+    if not scheduler.get_job("daily_bid_review"):
+        # routine.yaml: 매일 08:30 KST
+        scheduler.add_job(execute_bid_review, "cron", hour=8, minute=30, id="daily_bid_review")
     if not scheduler.running:
         scheduler.start()
-    print("[Hermes] 스케줄러 시작됨 (서연우 09:00 / 한도윤 10·15시 / 오지민 */30분)")
+    print("[Hermes] 스케줄러: 서연우 09:00 / 한도윤 10·15시 / 오지민 */30분 / 정하준 08:30")
 
 
 @bot.tree.command(name="run_keyword_scan", description="[데모용] 서연우 키워드 분석을 즉시 실행합니다")
@@ -127,6 +153,44 @@ async def run_anomaly_check_command(
     status = result["item"].status_summary
     await interaction.followup.send(
         f"완료: **{status}** → `{', '.join(result['targets'])}` (record #{result['record_id']})",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="run_bid_review", description="[데모용] 정하준 입찰/예산 조정안을 즉시 실행합니다")
+@app_commands.describe(tracking="데모용 트래킹 상태 강제 (미선택 시 DB/기본 Normal)")
+@app_commands.choices(
+    tracking=[
+        app_commands.Choice(name="db/기본 사용", value="auto"),
+        app_commands.Choice(name="normal (제안 생성)", value="normal"),
+        app_commands.Choice(name="warning (caution_flag)", value="warning"),
+        app_commands.Choice(name="critical (제안 보류 → 개발팀)", value="critical"),
+    ]
+)
+async def run_bid_review_command(
+    interaction: discord.Interaction,
+    tracking: app_commands.Choice[str] = None,
+):
+    override = None
+    if tracking and tracking.value != "auto":
+        override = tracking.value
+    await interaction.response.send_message(
+        f"📊 정하준이 입찰 검토를 시작합니다... (tracking=`{override or 'auto'}`)",
+        ephemeral=True,
+    )
+    batch = await execute_bid_review(override)
+    if batch is None:
+        await interaction.followup.send("⚠️ 입찰 검토 실패 — 콘솔 로그를 확인하세요.", ephemeral=True)
+        return
+    if batch.get("halted"):
+        await interaction.followup.send(
+            f"⛔ 보류: tracking=Critical → `#개발팀-에러알림` (record #{batch['record_id']})",
+            ephemeral=True,
+        )
+        return
+    n = len(batch.get("results", []))
+    await interaction.followup.send(
+        f"완료: **{n}건** 제안 (tracking={batch.get('tracking_status')}, caution={batch.get('caution')})",
         ephemeral=True,
     )
 

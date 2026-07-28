@@ -80,3 +80,68 @@ def get_fake_tracking_data(scenario: str = "critical") -> dict:
     # normal: base 그대로
 
     return copy.deepcopy(base)
+
+
+def get_fake_ads_data() -> list[dict]:
+    """
+    정하준용 Google Ads / Naver 검색광고 가짜 리포트.
+    시연용으로 auto_apply / human_approval / compliance 병행 케이스를 모두 넣는다.
+    """
+    return [
+        {
+            "source": "Google Ads",
+            "campaign": "DUI-야간",
+            "keyword": "음주운전 처벌기준",
+            "category": "DUI",
+            "device": "all",
+            "hour_range": "00:00-06:00",
+            "cpc": 1200,
+            "cpa": 48000,
+            "conv_rate": 0.042,
+            "conv_rate_baseline": 0.035,
+            "conv_rate_change_pct": 20,
+            "note": "야간 시간대 전환율이 베이스라인 대비 높게 관찰됨 → +15% 후보",
+        },
+        {
+            "source": "Naver",
+            "campaign": "긴급체포-주간",
+            "keyword": "긴급체포 대응",
+            "category": "일반형사",
+            "device": "all",
+            "hour_range": "09:00-18:00",
+            "cpc": 980,
+            "cpa": 92000,
+            "conv_rate": 0.012,
+            "conv_rate_baseline": 0.028,
+            "conv_rate_change_pct": -57,
+            "note": "전환율 급락·CPA 악화 → -35% 또는 PAUSE 후보 (사람 승인)",
+        },
+        {
+            "source": "Google Ads",
+            "campaign": "성범죄-모바일",
+            "keyword": "성범죄 변호사 상담",
+            "category": "성범죄",
+            "device": "mobile",
+            "hour_range": "",
+            "cpc": 1500,
+            "cpa": 51000,
+            "conv_rate": 0.038,
+            "conv_rate_baseline": 0.033,
+            "conv_rate_change_pct": 15,
+            "note": "모바일 전환율 관찰상 +10% 후보이나 민감 카테고리 → compliance 병행",
+        },
+        {
+            "source": "Naver",
+            "campaign": "폭행-합의",
+            "keyword": "폭행 합의 절차",
+            "category": "폭행",
+            "device": "desktop",
+            "hour_range": "18:00-24:00",
+            "cpc": 890,
+            "cpa": 44000,
+            "conv_rate": 0.036,
+            "conv_rate_baseline": 0.031,
+            "conv_rate_change_pct": 16,
+            "note": "저녁 시간대 전환율 상승 관찰 → +12% 후보 (auto_apply)",
+        },
+    ]

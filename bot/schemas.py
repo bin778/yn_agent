@@ -59,3 +59,32 @@ class DataAssistantOutput(BaseModel):
         description="원인 후보 단계: GTM / ETL / GA4 / unknown 등",
     )
     reason: str = Field(description="사실 → 판단 → 다음 행동 요약")
+
+
+class BidRecommendation(BaseModel):
+    """정하준 입찰/예산 조정 제안 1건."""
+
+    keyword: str
+    campaign: str = Field(default="", description="캠페인명")
+    action: Literal["INCREASE", "DECREASE", "PAUSE", "HOLD"]
+    adjustment_percentage: int = Field(
+        description="입찰 조정 비율. PAUSE/HOLD면 0. 예: 15 = +15%, -35 = -35%"
+    )
+    target_device: str = Field(default="all", description="mobile / desktop / all")
+    target_hour_range: str = Field(default="", description="예: 00:00-06:00, 비어있으면 전체")
+    category: str = Field(default="", description="DUI, 폭행, 성범죄, 미성년자 등")
+    sensitive_keyword: bool = Field(
+        default=False,
+        description="성범죄·미성년자 등 민감 키워드면 true → compliance_review 병행",
+    )
+    caution_flag: bool = Field(
+        default=False,
+        description="트래킹 Warning 등으로 신중 진행 시 true",
+    )
+    rationale: str = Field(description="관찰된 지표만 근거로 서술. 심리 상태 언급 금지")
+
+
+class PerformanceAnalystOutput(BaseModel):
+    """정하준(performance_analyst) 출력. routine.yaml performance_analyst_schema."""
+
+    recommendations: List[BidRecommendation]

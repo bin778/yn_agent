@@ -14,6 +14,8 @@ from .config import (
     DISCORD_CHANNEL_TRACKING_STATUS,
     DISCORD_CHANNEL_BROADCAST,
     DISCORD_CHANNEL_DEV_TEAM,
+    DISCORD_CHANNEL_AUTO_APPLY,
+    DISCORD_CHANNEL_HUMAN_APPROVAL,
 )
 from .db import record_decision
 
@@ -25,6 +27,8 @@ CHANNEL_MAP = {
     "data_assistant.tracking_status": DISCORD_CHANNEL_TRACKING_STATUS,
     "broadcast.all_agents": DISCORD_CHANNEL_BROADCAST,
     "dev_team.queue": DISCORD_CHANNEL_DEV_TEAM,
+    "auto_apply_queue": DISCORD_CHANNEL_AUTO_APPLY,
+    "human_approval.queue": DISCORD_CHANNEL_HUMAN_APPROVAL,
 }
 
 BODY_PREVIEW_LIMIT = 500
@@ -150,6 +154,48 @@ def build_tracking_embed(item, target: str, record_id: int, scenario: str = "") 
     return embed
 
 
+def build_bid_embed(item, target: str, record_id: int) -> discord.Embed:
+    is_human = target == "human_approval.queue"
+    is_compliance = target == "compliance_review.queue"
+    if is_compliance:
+        color = discord.Color.red()
+    elif is_human:
+        color = discord.Color.orange()
+    else:
+        color = discord.Color.green()
+
+    adj = item.adjustment_percentage
+    adj_text = f"{adj:+d}%" if item.action != "PAUSE" else "PAUSE"
+    embed = discord.Embed(
+        title=f"📊 {item.keyword}",
+        description=item.rationale,
+        color=color,
+    )
+    embed.add_field(name="action", value=item.action, inline=True)
+    embed.add_field(name="adjustment", value=adj_text, inline=True)
+    embed.add_field(name="campaign", value=item.campaign or "-", inline=True)
+    embed.add_field(name="device", value=item.target_device or "all", inline=True)
+    embed.add_field(name="시간대", value=item.target_hour_range or "전체", inline=True)
+    embed.add_field(name="category", value=item.category or "-", inline=True)
+    if item.sensitive_keyword:
+        embed.add_field(name="⚠️ sensitive", value="true (법무 병행)", inline=True)
+    if item.caution_flag:
+        embed.add_field(name="caution_flag", value="true (트래킹 Warning)", inline=True)
+    embed.set_footer(text=f"정하준 · record #{record_id} · routed_to: {target}")
+    return embed
+
+
+def build_halt_embed(halt_reason: str, record_id: int, tracking_status: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="⛔ 정하준 입찰 제안 보류",
+        description=halt_reason,
+        color=discord.Color.dark_red(),
+    )
+    embed.add_field(name="tracking_status", value=tracking_status, inline=True)
+    embed.set_footer(text=f"정하준 · record #{record_id} · halted")
+    return embed
+
+
 async def _post_to_channel(
     client: discord.Client,
     target: str,
@@ -221,4 +267,26 @@ async def post_data_assistant_result(client: discord.Client, result: dict):
         embed = build_tracking_embed(item, target, record_id, scenario=scenario)
         content = "@here" if target == "broadcast.all_agents" else None
         await _post_to_channel(client, target, embed, view=None, content=content)
+
+
+async def post_performance_result(client: discord.Client, batch: dict):
+    """
+    정하준 배치 결과 게시.
+    halted면 dev_team에 보류 알림.
+    그 외 각 recommendation을 targets 채널에 승인 버튼과 함께 게시.
+    """
+    if batch.get("halted"):
+        record_id = batch["record_id"]
+        embed = build_halt_embed(batch["halt_reason"], record_id, batch["tracking_status"])
+        for target in batch.get("notify_targets") or ["dev_team.queue"]:
+            await _post_to_channel(client, target, embed, view=None)
+        return
+
+    for result in batch.get("results") or []:
+        item = result["item"]
+        record_id = result["record_id"]
+        for target in result["targets"]:
+            embed = build_bid_embed(item, target, record_id)
+            view = ApprovalView(record_id, handoff=None)
+            await _post_to_channel(client, target, embed, view)
 

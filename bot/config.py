@@ -23,7 +23,7 @@ else:
 # ── 필수 키 ─────────────────────────────────────────
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
 # ── Discord 채널 ID (queues.md 기준, 미설정이면 콘솔 경고 후 스킵) ──
 DISCORD_CHANNEL_KEYWORD_QUEUE = os.getenv("DISCORD_CHANNEL_KEYWORD_QUEUE")       # #서연우-키워드큐
@@ -33,6 +33,8 @@ DISCORD_CHANNEL_PUBLISH = os.getenv("DISCORD_CHANNEL_PUBLISH")                  
 DISCORD_CHANNEL_TRACKING_STATUS = os.getenv("DISCORD_CHANNEL_TRACKING_STATUS")  # #오지민-트래킹상태
 DISCORD_CHANNEL_BROADCAST = os.getenv("DISCORD_CHANNEL_BROADCAST")              # #전체-긴급알림
 DISCORD_CHANNEL_DEV_TEAM = os.getenv("DISCORD_CHANNEL_DEV_TEAM")                # #개발팀-에러알림
+DISCORD_CHANNEL_AUTO_APPLY = os.getenv("DISCORD_CHANNEL_AUTO_APPLY")            # #정하준-자동조정대기
+DISCORD_CHANNEL_HUMAN_APPROVAL = os.getenv("DISCORD_CHANNEL_HUMAN_APPROVAL")    # #광고조정-승인필요
 
 # ── DB ──────────────────────────────────────────────
 DB_PATH = BOT_DIR / "hermes.db"
@@ -64,3 +66,7 @@ def check_required_env():
         print("[WARN] DISCORD_CHANNEL_BROADCAST 미설정 — 해당 채널로는 게시되지 않습니다.")
     if not DISCORD_CHANNEL_DEV_TEAM:
         print("[WARN] DISCORD_CHANNEL_DEV_TEAM 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_AUTO_APPLY:
+        print("[WARN] DISCORD_CHANNEL_AUTO_APPLY 미설정 — 해당 채널로는 게시되지 않습니다.")
+    if not DISCORD_CHANNEL_HUMAN_APPROVAL:
+        print("[WARN] DISCORD_CHANNEL_HUMAN_APPROVAL 미설정 — 해당 채널로는 게시되지 않습니다.")
