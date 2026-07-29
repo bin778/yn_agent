@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from .config import DISCORD_BOT_TOKEN, check_required_env
 from .agents.keyword_analyst import run_daily_keyword_scan
-from .agents.content_editor import process_backlog
+from .agents.content_editor import draft_content_from_record, process_backlog
 from .agents.data_assistant import run_anomaly_check
 from .agents.performance_analyst import run_bid_optimization
 from .discord_ui import (
@@ -42,8 +42,25 @@ async def execute_keyword_scan():
         return
     for r in results:
         await post_keyword_result(bot, r)
+        if r["target"] == "content_editor.inbox":
+            asyncio.create_task(auto_handoff_to_content_editor(r["record_id"]))
     high_risk_count = sum(1 for r in results if r["target"] == "compliance_review.queue")
     print(f"[서연우] {len(results)}건 처리 완료 (high-risk {high_risk_count}건 → 법무 검토로 분리)")
+
+async def auto_handoff_to_content_editor(keyword_record_id: int):
+    """
+    서연우 → 한도윤 자동 handoff.
+    routine.yaml의 on_new_keyword(event, listen_to: keyword_analyst.content_editor.inbox)를
+    실제 코드로 구현한 부분. 사람 개입 없이 즉시 실행됨.
+    """
+    print(f"[한도윤] 자동 handoff 시작 (키워드 record #{keyword_record_id})")
+    try:
+        result = await asyncio.to_thread(draft_content_from_record, keyword_record_id)
+    except Exception as e:
+        print(f"[한도윤][ERROR] 자동 초안 실패 (record #{keyword_record_id}): {e}")
+        return
+    await post_content_result(bot, result)
+    print(f"[한도윤] 자동 초안 완료 → {result['target']} (record #{result['record_id']})")
 
 
 async def execute_content_backlog():
@@ -70,8 +87,20 @@ async def execute_anomaly_check(scenario: str = "critical"):
         f"[오지민] 완료 status={result['item'].status_summary} "
         f"targets={result['targets']} record=#{result['record_id']}"
     )
+
+    if result["item"].status_summary == "Critical":
+        asyncio.create_task(auto_halt_performance_on_critical())
+
     return result
 
+async def auto_halt_performance_on_critical():
+    """
+    오지민 → 정하준 자동 handoff.
+    routine.yaml의 on_tracking_alert(listen_to: data_assistant.critical_alert)를 구현.
+    정하준의 다음 스케줄(08:30)을 기다리지 않고 즉시 반응해서 보류 알림을 올린다.
+    """
+    print("[정하준] Critical 감지 → 즉시 보류 알림 트리거")
+    await execute_bid_review(tracking_override="critical")
 
 async def execute_bid_review(tracking_override: str | None = None):
     print(f"[정하준] 입찰 검토 시작 (tracking_override={tracking_override})")

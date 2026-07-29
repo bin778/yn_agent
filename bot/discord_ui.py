@@ -45,6 +45,7 @@ class ApprovalView(discord.ui.View):
         self.record_id = record_id
         self.handoff = handoff
 
+    # 수정 후 (approve는 이제 순수 기록용)
     @discord.ui.button(label="✅ 승인", style=discord.ButtonStyle.success)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         record_decision(self.record_id, "approved", interaction.user.display_name)
@@ -52,24 +53,8 @@ class ApprovalView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(
-            f"✅ **{interaction.user.display_name}** 님이 승인했습니다. (record #{self.record_id})"
+            f"✅ **{interaction.user.display_name}** 님이 확인했습니다. (record #{self.record_id})"
         )
-
-        if self.handoff == "content_editor":
-            await interaction.followup.send(
-                f"✍️ 한도윤이 초안 작성을 시작합니다... (키워드 record #{self.record_id})"
-            )
-            try:
-                from .agents.content_editor import draft_content_from_record
-
-                result = await asyncio.to_thread(draft_content_from_record, self.record_id)
-                await post_content_result(interaction.client, result)
-                await interaction.followup.send(
-                    f"📝 한도윤 초안 완료 → `{result['target']}` (record #{result['record_id']})"
-                )
-            except Exception as e:
-                print(f"[한도윤][ERROR] 승인 후 초안 실패: {e}")
-                await interaction.followup.send(f"⚠️ 한도윤 초안 작성 실패: {e}")
 
     @discord.ui.button(label="❌ 반려", style=discord.ButtonStyle.danger)
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -224,7 +209,7 @@ async def post_keyword_result(client: discord.Client, result: dict):
     # inbox로 간 키워드만 승인 시 한도윤 핸드오프
     handoff = "content_editor" if target == "content_editor.inbox" else None
     embed = build_keyword_embed(result["item"], target, result["record_id"])
-    view = ApprovalView(result["record_id"], handoff=handoff)
+    view = ApprovalView(result["record_id"])
     await _post_to_channel(client, target, embed, view)
 
 
