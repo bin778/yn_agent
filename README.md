@@ -25,28 +25,31 @@
 yn_agent/
 ├── README.md                  ← 지금 보고 있는 문서
 ├── ORCHESTRATION.md            ← 4명이 어떻게 맞물리는지 전체 흐름
+├── bot/                        ← Discord 파일럿 봇 (4명 실행)
+│   └── SETUP.md                ← 시연 스크립트·채널·권한 체크리스트
 ├── _shared/                    ← 4명 공통 참조 자료
 │   ├── knowledge/
-│   │   ├── compliance_rules.md   # 변협 광고규정 요약, 컴플라이언스 판단 근거
-│   │   └── domain_glossary.md    # 형사사건 도메인 용어집
+│   │   ├── compliance_rules.md
+│   │   └── domain_glossary.md
 │   ├── examples/
-│   │   └── few_shot_cases.md     # 역할별 경계 사례 (판단 기준 예시)
-│   ├── queues.md                 # (예정) 큐/상태값 레지스트리
-│   └── roles.md                  # (예정) 에스컬레이션 대상 정의
-└── {agent_name}/                # 직원별 폴더 (동일 구조 반복)
-    ├── SOUL.md                    # 정체성, 판단 원칙, 절대 하지 않는 일
-    ├── config.md                  # 입출력 소스, 권한 경계, 임계치
-    ├── routine.yaml                 # 트리거, 스케줄, handoff, 에스컬레이션 규칙
-    ├── tools.md                    # (예정) 호출 가능한 도구 화이트리스트
-    └── evals/test_cases.md         # (예정) 회귀 테스트용 케이스
+│   │   └── few_shot_cases.md
+│   ├── queues.md               # 큐 ↔ Discord 채널 레지스트리
+│   └── roles.md                # 에스컬레이션 Discord role 정의
+└── {agent_name}/               # 직원별 폴더 (동일 구조 반복)
+    ├── SOUL.md
+    ├── config.md
+    ├── routine.yaml
+    ├── tools.md                # (예정)
+    └── evals/test_cases.md     # (예정)
 ```
 
 ## 이 문서들을 처음 보시는 분께 (읽는 순서 추천)
 
 1. 이 README.md (지금 이 문서)
 2. [ORCHESTRATION.md](./ORCHESTRATION.md) — 전체 그림
-3. 관심 있는 직원의 `SOUL.md` → `config.md` → `routine.yaml` 순서
-4. `_shared/knowledge/`, `_shared/examples/` — 공통 판단 근거
+3. **시연·로컬 실행**: [bot/SETUP.md](./bot/SETUP.md)
+4. 관심 있는 직원의 `SOUL.md` → `config.md` → `routine.yaml`
+5. `_shared/knowledge/`, `_shared/examples/` — 공통 판단 근거
 
 ## 핵심 설계 원칙 (전체 공통)
 
@@ -61,8 +64,12 @@ yn_agent/
 - [x] 공통 knowledge (컴플라이언스 규정, 도메인 용어집) 완결
 - [x] 공통 examples (경계 사례) 완결
 - [x] \_shared/queues.md, \_shared/roles.md
+- [x] Discord 파일럿 봇 (`bot/`) — 서연우·한도윤·오지민·정하준 + 슬래시커맨드/스케줄/승인 버튼
+- [x] 시연 스크립트·채널 권한 체크리스트 ([bot/SETUP.md](./bot/SETUP.md))
 - [ ] 직원별 tools.md, evals/test_cases.md
-- [ ] 실제 직원별 파일럿 코드 구현
+- [ ] 실데이터 API 연동 (현재 `USE_FAKE_DATA=true`)
+- [ ] 승인 후 실제 실행(CMS 발행 / Ads 반영)
+- [ ] Discord role ID 채우기 (`_shared/roles.md` — 서버에서 역할 생성 후)
 
 ## 변경 관리
 
