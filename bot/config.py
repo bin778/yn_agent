@@ -70,3 +70,9 @@ def check_required_env():
         print("[WARN] DISCORD_CHANNEL_AUTO_APPLY 미설정 — 해당 채널로는 게시되지 않습니다.")
     if not DISCORD_CHANNEL_HUMAN_APPROVAL:
         print("[WARN] DISCORD_CHANNEL_HUMAN_APPROVAL 미설정 — 해당 채널로는 게시되지 않습니다.")
+
+# ── Discord 역할 ID (각 역할별 권한 설정) ──────────────────────────────
+DISCORD_ROLE_MARKETING_LEAD = os.getenv("DISCORD_ROLE_MARKETING_LEAD")
+DISCORD_ROLE_LEGAL_COMPLIANCE = os.getenv("DISCORD_ROLE_LEGAL_COMPLIANCE")
+DISCORD_ROLE_ATTORNEY_REVIEWER = os.getenv("DISCORD_ROLE_ATTORNEY_REVIEWER")
+DISCORD_ROLE_PUBLISH_OPERATOR = os.getenv("DISCORD_ROLE_PUBLISH_OPERATOR")
