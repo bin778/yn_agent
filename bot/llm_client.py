@@ -9,11 +9,15 @@ from pydantic import BaseModel, ValidationError
 
 from .config import GOOGLE_API_KEY, GEMINI_MODEL
 
-_client = genai.Client(api_key=GOOGLE_API_KEY)
-
-
 class SchemaParseError(Exception):
     pass
+
+
+def _get_client() -> genai.Client:
+    """Create the network client only when an agent run actually needs it."""
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("필수 환경변수가 없습니다: GOOGLE_API_KEY")
+    return genai.Client(api_key=GOOGLE_API_KEY)
 
 
 def call_gemini_structured(
@@ -27,10 +31,11 @@ def call_gemini_structured(
     user_prompt: 이번 작업(오늘의 데이터 등)
     schema_model: 응답을 검증할 Pydantic 모델 (예: KeywordAnalystOutput)
     """
+    client = _get_client()
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = _client.models.generate_content(
+            response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=user_prompt,
                 config=types.GenerateContentConfig(

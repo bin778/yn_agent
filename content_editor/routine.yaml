@@ -23,7 +23,7 @@ triggers:
       이벤트를 놓쳤거나 실패한 항목이 큐에 남아있는지 확인 후 재시도.
 
 pre_task_context:
-  - load: agent_memory.recent_rejections # 최근 반려된 콘텐츠 및 사유
+  - load: work_items.recent_rejections # 최근 반려된 콘텐츠 및 사유
   - load: knowledge/compliance_rules.md
   - load: knowledge/domain_glossary.md
   - load: examples/few_shot_cases.md
@@ -45,7 +45,7 @@ steps:
       본문에 형량/합의금 구체 언급 → route_to: human_review.queue
       위 조건 모두 미해당 → route_to: publish_queue (발행은 별도 승인 후 실행)
   - step: record
-    write_to: [agent_memory, audit_log]
+    write_to: [work_items, approval_requests, audit_events]
 
 handoff:
   default_target: human_review.queue # 기본값은 항상 사람 검토 (보수적으로 설정)
@@ -56,19 +56,19 @@ handoff:
 
 escalation:
   - trigger: 'human_review 반려율 >= 30% (최근 7일)'
-    notify: ['marketing_lead']
-    channel: 'discord:#패턴경고'
+    notify: ['content_approver']
+    queue: 'pattern_alert.queue'
     message_template: >
       [한도윤] 최근 7일 반려율 {rate}%. 프롬프트/knowledge 점검 필요.
 
   - trigger: 'schema_parse_fail_count >= 3 (연속)'
-    notify: ['dev_team']
-    channel: 'discord:#개발팀-에러알림'
+    notify: ['operations_owner']
+    queue: 'dev_team.queue'
     action: 'halt_current_batch'
 
   - trigger: '동일 flagged_claims 사유 >= 5회 반복 (7일 내)'
     notify: ['legal_compliance']
-    channel: 'discord:#컴플라이언스-검토'
+    queue: 'compliance_review.queue'
     message_template: >
       [한도윤] "{reason}" 사유로 반복 플래그 발생. knowledge base 갱신 검토 요청.
 
@@ -82,17 +82,11 @@ audit:
   fields: [timestamp, model_version, prompt_version, source_keyword, flagged_claims, routed_to]
 
 interface:
-  type: discord
-  approval_method: 'button'
-  channels:
+  type: platform_adapter_pending
+  approval_method: 'approval_service'
+  queues:
     default:
       queue_ref: 'human_review.queue'
-      discord_channel_name: '#콘텐츠-검수대기'
     auto_eligible:
       queue_ref: 'publish_queue'
-      discord_channel_name: '#발행대기'
-  message_style:
-    embed: true
-    include_fields: [title, hook, flagged_claims, target_keyword]
-    include_audit_ref: true
-    truncate_body_preview: 500 # 본문 전체는 링크로, 미리보기만 embed에
+  payload_fields: [title, hook, flagged_claims, sensitive_flags, target_keyword]

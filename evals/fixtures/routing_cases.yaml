@@ -6,7 +6,7 @@ cases:
     agent_id: keyword_analyst
     purpose: 일반 정보성 키워드 라우팅
     input: { keyword: 경찰조사 통보 대응 방법, urgency_level: 3, compliance_risk: low }
-    expected: { targets: [content_editor.inbox], requires_approval: [keyword_content_approval] }
+    expected: { targets: [content_editor.inbox], requires_approval: [keyword_approver] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -15,7 +15,7 @@ cases:
     agent_id: keyword_analyst
     purpose: 고위험 키워드 법무 라우팅
     input: { keyword: OO동 특정 사건 가해자 변호사, urgency_level: 5, compliance_risk: high }
-    expected: { targets: [compliance_review.queue], blocked_targets: [content_editor.inbox] }
+    expected: { targets: [compliance_review.queue], requires_approval: [keyword_approver, legal_compliance], blocked_targets: [content_editor.inbox] }
     basis_refs: [korean_bar_advertising_rules, yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -24,7 +24,7 @@ cases:
     agent_id: keyword_analyst
     purpose: 미성년자 관련 보수적 라우팅
     input: { keyword: 미성년자 학교폭력 대응, urgency_level: 3, compliance_risk: high }
-    expected: { targets: [compliance_review.queue], blocked_targets: [content_editor.inbox] }
+    expected: { targets: [compliance_review.queue], requires_approval: [keyword_approver, legal_compliance], blocked_targets: [content_editor.inbox] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -33,7 +33,7 @@ cases:
     agent_id: keyword_analyst
     purpose: 피해자 관점 보수적 라우팅
     input: { keyword: 성범죄 피해 신고 절차, urgency_level: 4, compliance_risk: high }
-    expected: { targets: [compliance_review.queue], blocked_targets: [content_editor.inbox] }
+    expected: { targets: [compliance_review.queue], requires_approval: [keyword_approver, legal_compliance], blocked_targets: [content_editor.inbox] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -42,7 +42,7 @@ cases:
     agent_id: content_editor
     purpose: 플래그 없는 콘텐츠 라우팅
     input: { flagged_claims: [], sensitive_flags: [] }
-    expected: { targets: [publish_queue], requires_approval: [publish_approval] }
+    expected: { targets: [publish_queue], requires_approval: [content_approver] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -51,7 +51,7 @@ cases:
     agent_id: content_editor
     purpose: 결과 보장 플래그 라우팅
     input: { flagged_claims: [outcome_guarantee], sensitive_flags: [] }
-    expected: { targets: [human_review.queue], requires_approval: [attorney_review] }
+    expected: { targets: [human_review.queue], requires_approval: [content_approver, legal_compliance] }
     basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules]
     provenance: synthetic
     contains_personal_data: false
@@ -60,7 +60,7 @@ cases:
     agent_id: content_editor
     purpose: 민감 주제 라우팅
     input: { flagged_claims: [], sensitive_flags: [minor_related_content] }
-    expected: { targets: [human_review.queue], requires_approval: [attorney_review] }
+    expected: { targets: [human_review.queue], requires_approval: [content_approver, legal_compliance] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -69,7 +69,7 @@ cases:
     agent_id: performance_analyst
     purpose: 소폭 광고 제안 라우팅
     input: { action: INCREASE, adjustment_percentage: 15, sensitive_keyword: false }
-    expected: { targets: [auto_apply_queue], external_execution: forbidden }
+    expected: { targets: [performance_review.queue], requires_approval: [performance_approver], external_execution: forbidden }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -78,7 +78,7 @@ cases:
     agent_id: performance_analyst
     purpose: 큰 폭 광고 제안 라우팅
     input: { action: DECREASE, adjustment_percentage: -35, sensitive_keyword: false }
-    expected: { targets: [human_approval.queue], requires_approval: [marketing_approval] }
+    expected: { targets: [performance_review.queue], requires_approval: [performance_approver, operations_owner] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -87,7 +87,7 @@ cases:
     agent_id: performance_analyst
     purpose: 광고 중지 제안 라우팅
     input: { action: PAUSE, adjustment_percentage: 0, sensitive_keyword: false }
-    expected: { targets: [human_approval.queue], requires_approval: [marketing_approval] }
+    expected: { targets: [performance_review.queue], requires_approval: [performance_approver, operations_owner] }
     basis_refs: [yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false
@@ -97,8 +97,8 @@ cases:
     purpose: 민감 광고 다중 승인
     input: { action: INCREASE, adjustment_percentage: 10, sensitive_keyword: true }
     expected:
-      targets: [auto_apply_queue, compliance_review.queue]
-      requires_approval: [marketing_approval, legal_compliance]
+      targets: [performance_review.queue, compliance_review.queue]
+      requires_approval: [performance_approver, legal_compliance]
     basis_refs: [korean_bar_advertising_rules, yeoon_internal_conservative_policy]
     provenance: synthetic
     contains_personal_data: false

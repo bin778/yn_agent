@@ -7,7 +7,7 @@ steps 매핑:
   analyze    → call_gemini_structured()
   classify   → compliance_risk == "high" → compliance_review.queue
                else                       → content_editor.inbox
-  record     → db.record_run()
+  record     → workflow.create_work_item() + 역할별 승인 요청
 """
 import json
 
@@ -15,7 +15,8 @@ from ..loaders import build_system_prompt
 from ..fake_data import get_fake_search_data
 from ..llm_client import call_gemini_structured
 from ..schemas import KeywordAnalystOutput
-from ..db import record_run, recent_history
+from ..db import recent_history
+from ..workflow import create_work_item
 from ..config import GEMINI_MODEL
 
 AGENT_ID = "keyword_analyst"
@@ -26,15 +27,15 @@ def _format_history(agent_id: str) -> str:
     if not rows:
         return "(최근 이력 없음 — 첫 실행이거나 아직 반려 사례가 없음)"
     lines = []
-    for created_at, output_json, routed_to, human_decision in rows:
-        lines.append(f"- {created_at[:19]} | routed_to={routed_to} | 사람판단={human_decision or '대기중'}")
+    for created_at, output_json, routed_to, workflow_status in rows:
+        lines.append(f"- {created_at[:19]} | routed_to={routed_to} | workflow_status={workflow_status}")
     return "\n".join(lines)
 
 
 def run_daily_keyword_scan() -> list[dict]:
     """
     routine.yaml의 daily_keyword_scan 트리거가 실행하는 작업.
-    반환값: [{"item": KeywordItem, "target": str, "record_id": int}, ...]
+    반환값: [{"item", "target", "work_item_id", "version", "request_id"}, ...]
     """
     system_prompt = build_system_prompt(AGENT_ID)
     data = get_fake_search_data()
@@ -61,13 +62,13 @@ def run_daily_keyword_scan() -> list[dict]:
         # config.md classify 규칙: compliance_risk == high → compliance_review.queue
         target = "compliance_review.queue" if item.compliance_risk == "high" else "content_editor.inbox"
 
-        record_id = record_run(
+        workflow_ref = create_work_item(
             agent_id=AGENT_ID,
             output=item.model_dump(),
             routed_to=target,
             model_version=GEMINI_MODEL,
             input_summary=item.keyword,
         )
-        routed_results.append({"item": item, "target": target, "record_id": record_id})
+        routed_results.append({"item": item, "target": target, **workflow_ref})
 
     return routed_results

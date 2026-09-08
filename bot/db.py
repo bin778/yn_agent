@@ -1,201 +1,230 @@
-"""
-agent_memory, audit_log를 SQLite로 관리.
-queues.md 10, 11번 항목 참고: "Discord 채널이 아니라 DB가 진실의 원천"
-"""
-import sqlite3
+"""SQLite persistence for the platform-independent Hermes workflow."""
+
+from __future__ import annotations
+
+import datetime as dt
 import json
-import datetime
+import sqlite3
+from pathlib import Path
+
 from .config import DB_PATH
 
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS agent_memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def utc_iso(value: dt.datetime | None = None) -> str:
+    return (value or utc_now()).astimezone(dt.timezone.utc).isoformat()
+
+
+def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path or DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS work_items (
+            work_item_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version > 0),
             agent_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
             output_json TEXT NOT NULL,
             routed_to TEXT NOT NULL,
-            human_decision TEXT DEFAULT NULL,   -- approved / rejected / NULL(대기중)
-            decided_by TEXT DEFAULT NULL,
-            decided_at TEXT DEFAULT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'recorded', 'pending_approval', 'approved', 'rejected',
+                'revision_requested', 'expired', 'cancelled',
+                'acknowledgement_pending', 'acknowledged', 'halted'
+            )),
             model_version TEXT,
             input_summary TEXT,
-            output_summary TEXT,
-            routed_to TEXT
-        )
-    """)
-    conn.execute("""
+            correlation_id TEXT NOT NULL,
+            parent_version INTEGER,
+            PRIMARY KEY (work_item_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS approval_requests (
+            request_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
+            policy_key TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'pending', 'approved', 'rejected', 'revision_requested', 'expired', 'cancelled'
+            )),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            resolved_at TEXT,
+            requested_by TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            distinct_approvers INTEGER NOT NULL DEFAULT 1 CHECK (distinct_approvers IN (0, 1)),
+            UNIQUE (work_item_id, work_item_version),
+            FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS approval_requirements (
+            requirement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            role_key TEXT NOT NULL,
+            approvals_required INTEGER NOT NULL DEFAULT 1 CHECK (approvals_required > 0),
+            UNIQUE (request_id, role_key),
+            FOREIGN KEY (request_id) REFERENCES approval_requests(request_id)
+        );
+        CREATE TABLE IF NOT EXISTS approval_decisions (
+            decision_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            actor_role TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected', 'revision_requested')),
+            reason TEXT,
+            decided_at TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            UNIQUE (request_id, actor_id),
+            FOREIGN KEY (request_id) REFERENCES approval_requests(request_id)
+        );
+        CREATE TABLE IF NOT EXISTS acknowledgement_requirements (
+            requirement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
+            role_key TEXT NOT NULL,
+            acknowledgements_required INTEGER NOT NULL DEFAULT 1 CHECK (acknowledgements_required > 0),
+            UNIQUE (work_item_id, work_item_version, role_key),
+            FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS acknowledgements (
+            acknowledgement_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
+            actor_id TEXT NOT NULL,
+            actor_role TEXT NOT NULL,
+            acknowledged_at TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            UNIQUE (work_item_id, work_item_version, actor_id),
+            FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS handoff_jobs (
+            handoff_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
+            handoff_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'claimed', 'completed', 'failed')),
+            created_at TEXT NOT NULL,
+            claimed_at TEXT,
+            completed_at TEXT,
+            claim_token TEXT,
+            error TEXT,
+            correlation_id TEXT NOT NULL,
+            UNIQUE (work_item_id, work_item_version, handoff_type),
+            FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS audit_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
+            agent_id TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            model_provider TEXT,
+            model_id TEXT,
+            prompt_version TEXT,
+            occurred_at TEXT NOT NULL,
+            previous_state TEXT,
+            new_state TEXT,
+            reason TEXT,
+            correlation_id TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tracking_status (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             status TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            record_id INTEGER,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
             output_json TEXT NOT NULL
-        )
-    """)
+        );
+        CREATE TRIGGER IF NOT EXISTS approval_decisions_no_update
+        BEFORE UPDATE ON approval_decisions BEGIN
+            SELECT RAISE(ABORT, 'approval decisions are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS approval_decisions_no_delete
+        BEFORE DELETE ON approval_decisions BEGIN
+            SELECT RAISE(ABORT, 'approval decisions are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+        BEFORE UPDATE ON audit_events BEGIN
+            SELECT RAISE(ABORT, 'audit events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+        BEFORE DELETE ON audit_events BEGIN
+            SELECT RAISE(ABORT, 'audit events are append-only');
+        END;
+        """
+    )
+    conn.commit()
     return conn
 
 
-def record_run(agent_id: str, output: dict, routed_to: str, model_version: str, input_summary: str) -> int:
-    """작업 결과를 agent_memory + audit_log에 동시 기록하고 agent_memory의 record id를 반환."""
-    conn = get_conn()
-    now = datetime.datetime.utcnow().isoformat()
-    cur = conn.execute(
-        "INSERT INTO agent_memory (agent_id, created_at, output_json, routed_to) VALUES (?, ?, ?, ?)",
-        (agent_id, now, json.dumps(output, ensure_ascii=False), routed_to),
-    )
-    record_id = cur.lastrowid
-    conn.execute(
-        """INSERT INTO audit_log (agent_id, created_at, model_version, input_summary, output_summary, routed_to)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (agent_id, now, model_version, input_summary, json.dumps(output, ensure_ascii=False)[:500], routed_to),
-    )
-    conn.commit()
-    conn.close()
-    return record_id
-
-
-def record_decision(record_id: int, decision: str, decided_by: str):
-    """Discord에서 승인/반려 버튼을 눌렀을 때 agent_memory에 반영."""
-    conn = get_conn()
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "UPDATE agent_memory SET human_decision=?, decided_by=?, decided_at=? WHERE id=?",
-        (decision, decided_by, now, record_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def recent_history(agent_id: str, limit: int = 5) -> list[tuple]:
-    """서연우 SOUL.md 원칙: '최근 반려 이력을 먼저 확인하고 패턴을 인지한다' 를 위한 조회."""
-    conn = get_conn()
+def recent_history(agent_id: str, limit: int = 5, db_path: str | Path | None = None) -> list[tuple]:
+    conn = get_conn(db_path)
     rows = conn.execute(
-        """SELECT created_at, output_json, routed_to, human_decision
-           FROM agent_memory WHERE agent_id=? ORDER BY id DESC LIMIT ?""",
+        "SELECT created_at, output_json, routed_to, status FROM work_items WHERE agent_id=? ORDER BY created_at DESC LIMIT ?",
         (agent_id, limit),
     ).fetchall()
     conn.close()
-    return rows
+    return [tuple(row) for row in rows]
 
 
-def get_record(record_id: int) -> dict | None:
-    """agent_memory 단건 조회. 없으면 None."""
-    conn = get_conn()
-    row = conn.execute(
-        """SELECT id, agent_id, created_at, output_json, routed_to, human_decision
-           FROM agent_memory WHERE id=?""",
-        (record_id,),
-    ).fetchone()
+def recent_rejections(agent_id: str, limit: int = 5, db_path: str | Path | None = None) -> list[tuple]:
+    conn = get_conn(db_path)
+    rows = conn.execute(
+        "SELECT created_at, output_json, routed_to, status FROM work_items WHERE agent_id=? AND status='rejected' ORDER BY created_at DESC LIMIT ?",
+        (agent_id, limit),
+    ).fetchall()
     conn.close()
-    if not row:
+    return [tuple(row) for row in rows]
+
+
+def get_work_item(work_item_id: str, version: int | None = None, db_path: str | Path | None = None) -> dict | None:
+    conn = get_conn(db_path)
+    if version is None:
+        row = conn.execute(
+            "SELECT * FROM work_items WHERE work_item_id=? ORDER BY version DESC LIMIT 1", (work_item_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM work_items WHERE work_item_id=? AND version=?", (work_item_id, version)
+        ).fetchone()
+    conn.close()
+    if row is None:
         return None
-    return {
-        "id": row[0],
-        "agent_id": row[1],
-        "created_at": row[2],
-        "output": json.loads(row[3]),
-        "routed_to": row[4],
-        "human_decision": row[5],
-    }
+    result = dict(row)
+    result["output"] = json.loads(result.pop("output_json"))
+    return result
 
 
-def recent_rejections(agent_id: str, limit: int = 5) -> list[tuple]:
-    """한도윤 pre_task: 최근 반려된 콘텐츠 및 사유."""
-    conn = get_conn()
-    rows = conn.execute(
-        """SELECT created_at, output_json, routed_to, human_decision
-           FROM agent_memory
-           WHERE agent_id=? AND human_decision='rejected'
-           ORDER BY id DESC LIMIT ?""",
-        (agent_id, limit),
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def list_approved_keywords_awaiting_draft(limit: int = 10) -> list[dict]:
-    """
-    content_editor.inbox로 라우팅되어 승인됐지만,
-    아직 한도윤이 같은 키워드로 초안을 만들지 않은 항목.
-    """
-    conn = get_conn()
-    drafted_rows = conn.execute(
-        """SELECT output_json FROM agent_memory WHERE agent_id='content_editor'"""
-    ).fetchall()
-    drafted_keywords = set()
-    for (output_json,) in drafted_rows:
-        try:
-            drafted_keywords.add(json.loads(output_json).get("target_keyword", ""))
-        except (json.JSONDecodeError, AttributeError):
-            pass
-
-    rows = conn.execute(
-        """SELECT id, output_json, routed_to
-           FROM agent_memory
-           WHERE agent_id='keyword_analyst'
-             AND routed_to='content_editor.inbox'
-             AND human_decision='approved'
-           ORDER BY id ASC""",
-    ).fetchall()
-    conn.close()
-
-    pending = []
-    for record_id, output_json, routed_to in rows:
-        output = json.loads(output_json)
-        keyword = output.get("keyword", "")
-        if keyword and keyword not in drafted_keywords:
-            pending.append(
-                {
-                    "id": record_id,
-                    "output": output,
-                    "routed_to": routed_to,
-                }
-            )
-            if len(pending) >= limit:
-                break
-    return pending
-
-
-def upsert_tracking_status(status: str, output: dict, record_id: int) -> None:
-    """오지민이 매 실행마다 갱신. 정하준은 get_tracking_status()로 조회."""
-    conn = get_conn()
-    now = datetime.datetime.utcnow().isoformat()
+def upsert_tracking_status(status: str, output: dict, work_item_id: str, work_item_version: int, db_path: str | Path | None = None) -> None:
+    conn = get_conn(db_path)
     conn.execute(
-        """INSERT INTO tracking_status (id, status, updated_at, record_id, output_json)
-           VALUES (1, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             status=excluded.status,
-             updated_at=excluded.updated_at,
-             record_id=excluded.record_id,
+        """INSERT INTO tracking_status (id, status, updated_at, work_item_id, work_item_version, output_json)
+           VALUES (1, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at,
+             work_item_id=excluded.work_item_id, work_item_version=excluded.work_item_version,
              output_json=excluded.output_json""",
-        (status, now, record_id, json.dumps(output, ensure_ascii=False)),
+        (status, utc_iso(), work_item_id, work_item_version, json.dumps(output, ensure_ascii=False)),
     )
     conn.commit()
     conn.close()
 
 
-def get_tracking_status() -> dict | None:
-    """정하준 pre_task: data_assistant.tracking_status 조회."""
-    conn = get_conn()
+def get_tracking_status(db_path: str | Path | None = None) -> dict | None:
+    conn = get_conn(db_path)
     row = conn.execute(
-        "SELECT status, updated_at, record_id, output_json FROM tracking_status WHERE id=1"
+        "SELECT status, updated_at, work_item_id, work_item_version, output_json FROM tracking_status WHERE id=1"
     ).fetchone()
     conn.close()
-    if not row:
+    if row is None:
         return None
-    return {
-        "status": row[0],
-        "updated_at": row[1],
-        "record_id": row[2],
-        "output": json.loads(row[3]),
-    }
+    return {"status": row["status"], "updated_at": row["updated_at"], "work_item_id": row["work_item_id"],
+            "version": row["work_item_version"], "output": json.loads(row["output_json"])}

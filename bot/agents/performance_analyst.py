@@ -8,10 +8,10 @@ steps 매핑:
       Warning  → caution_flag=True 로 진행
   fetch_data → get_fake_ads_data()
   analyze    → call_gemini_structured()
-  classify   → |adj|>20 or PAUSE → human_approval.queue
-               else → auto_apply_queue
-               sensitive → compliance_review.queue 병행
-  record     → db.record_run()
+  classify   → 모든 제안은 퍼포먼스 승인 대기
+               |adj|>20 or PAUSE → operations_owner 추가
+               sensitive → legal_compliance 추가
+  record     → workflow.create_work_item()
 """
 import json
 
@@ -19,7 +19,8 @@ from ..loaders import build_system_prompt
 from ..fake_data import get_fake_ads_data
 from ..llm_client import call_gemini_structured
 from ..schemas import PerformanceAnalystOutput, BidRecommendation
-from ..db import record_run, recent_history, get_tracking_status
+from ..db import recent_history, get_tracking_status
+from ..workflow import create_work_item
 from ..config import GEMINI_MODEL, USE_FAKE_DATA
 
 AGENT_ID = "performance_analyst"
@@ -30,13 +31,13 @@ def _format_history() -> str:
     if not rows:
         return "(최근 제안 이력 없음)"
     lines = []
-    for created_at, output_json, routed_to, human_decision in rows:
+    for created_at, output_json, routed_to, workflow_status in rows:
         try:
             output = json.loads(output_json)
             kw = output.get("keyword", "?")
             adj = output.get("adjustment_percentage", "?")
             action = output.get("action", "?")
-            summary = f"{kw} | {action} {adj}% | 사람판단={human_decision or '대기중'}"
+            summary = f"{kw} | {action} {adj}% | workflow_status={workflow_status}"
         except (json.JSONDecodeError, AttributeError):
             summary = output_json[:120]
         lines.append(f"- {created_at[:19]} | {summary} | routed_to={routed_to}")
@@ -44,9 +45,7 @@ def _format_history() -> str:
 
 
 def _classify_targets(item: BidRecommendation) -> list[str]:
-    needs_human = abs(item.adjustment_percentage) > 20 or item.action == "PAUSE"
-    primary = "human_approval.queue" if needs_human else "auto_apply_queue"
-    targets = [primary]
+    targets = ["performance_review.queue"]
     if item.sensitive_keyword or item.category in ("성범죄", "미성년자"):
         if "compliance_review.queue" not in targets:
             targets.append("compliance_review.queue")
@@ -62,7 +61,7 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
 
     반환:
       halted=True 이면 recommendations 없음, halt_reason / notify_targets 포함
-      아니면 {"results": [{"item", "targets", "record_id"}, ...], "caution": bool, "tracking_status": str}
+      아니면 {"results": [{"item", "targets", "work_item_id", "version"}, ...], "caution": bool, "tracking_status": str}
     """
     tracking = get_tracking_status()
     if tracking_override:
@@ -85,14 +84,14 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
             "notify_targets": ["dev_team.queue"],
             "results": [],
         }
-        record_id = record_run(
+        workflow_ref = create_work_item(
             agent_id=AGENT_ID,
             output={"halted": True, "reason": halt_payload["halt_reason"], "tracking_status": status},
             routed_to="dev_team.queue",
             model_version=GEMINI_MODEL,
             input_summary="halt:tracking_critical",
         )
-        halt_payload["record_id"] = record_id
+        halt_payload.update(workflow_ref)
         return halt_payload
 
     caution = status == "Warning"
@@ -134,14 +133,14 @@ status={status}, caution={caution}
             item = item.model_copy(update={"sensitive_keyword": True})
 
         targets = _classify_targets(item)
-        record_id = record_run(
+        workflow_ref = create_work_item(
             agent_id=AGENT_ID,
             output=item.model_dump(),
             routed_to=",".join(targets),
             model_version=GEMINI_MODEL,
             input_summary=item.keyword,
         )
-        routed_results.append({"item": item, "targets": targets, "record_id": record_id})
+        routed_results.append({"item": item, "targets": targets, **workflow_ref})
 
     return {
         "halted": False,

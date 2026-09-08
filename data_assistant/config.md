@@ -6,7 +6,7 @@
 | ----------------------- | --------------------------------------------- | ------------------------ |
 | GA4 Realtime/Event Data | 세션, 이벤트(click_kakaotalk, submit_form 등) | GA4 Data API (읽기 전용) |
 | GTM 컨테이너 상태       | 태그 발행 상태, 트리거 이력                   | GTM API (읽기 전용)      |
-| `agent_memory`          | 최근 이상탐지 이력                            | 내부 조회 전용           |
+| `work_items`            | 최근 이상탐지 이력                            | 내부 조회 전용           |
 
 > 원본 세션 데이터에 IP/기기ID 등 식별 정보가 포함되어 있어도, 이 직원의 출력에는 절대 원문으로 노출하지 않는다 (SOUL.md 원칙 2).
 
@@ -17,7 +17,7 @@
 | `broadcast.all_agents`           | status_summary = "Critical"           | 서연우·한도윤·정하준 전체에게 즉시 알림 (해당 데이터 기반 작업 일시 보류 신호) |
 | `dev_team.queue`                 | GTM 태그 오류로 추정되는 이상         | 자동 등록                                                                      |
 | `data_assistant.tracking_status` | 매 실행마다 (Normal/Warning/Critical) | 정하준이 실행 전 항상 조회하는 상태값                                          |
-| `agent_memory` / `audit_log`     | 모든 실행 결과                        | 자동 기록                                                                      |
+| `work_items` / `audit_events`    | 모든 실행 결과                        | 자동 기록                                                                      |
 
 ## 권한 경계
 

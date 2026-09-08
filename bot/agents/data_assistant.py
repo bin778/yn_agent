@@ -9,7 +9,7 @@ steps 매핑:
   classify    → Critical → broadcast + dev_team
                 privacy_flags → dev_team
                 항상 tracking_status 갱신
-  record      → db.record_run() + upsert_tracking_status()
+  record      → workflow.create_work_item() + upsert_tracking_status()
 """
 import copy
 import json
@@ -18,7 +18,8 @@ from ..loaders import build_system_prompt
 from ..fake_data import get_fake_tracking_data
 from ..llm_client import call_gemini_structured
 from ..schemas import DataAssistantOutput
-from ..db import record_run, recent_history, upsert_tracking_status
+from ..db import recent_history, upsert_tracking_status
+from ..workflow import create_work_item
 from ..config import GEMINI_MODEL, USE_FAKE_DATA
 
 AGENT_ID = "data_assistant"
@@ -89,7 +90,7 @@ def run_anomaly_check(scenario: str = "critical") -> dict:
     반환: {
       "item": DataAssistantOutput,
       "targets": [str, ...],
-      "record_id": int,
+      "work_item_id": str, "version": int,
       "scenario": str,
     }
     """
@@ -132,18 +133,23 @@ SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세�
     targets = _classify_targets(result)
     routed_to = ",".join(targets)
 
-    record_id = record_run(
+    workflow_ref = create_work_item(
         agent_id=AGENT_ID,
         output=result.model_dump(),
         routed_to=routed_to,
         model_version=GEMINI_MODEL,
         input_summary=f"scenario={scenario}|status={result.status_summary}",
     )
-    upsert_tracking_status(result.status_summary, result.model_dump(), record_id)
+    upsert_tracking_status(
+        result.status_summary,
+        result.model_dump(),
+        workflow_ref["work_item_id"],
+        workflow_ref["version"],
+    )
 
     return {
         "item": result,
         "targets": targets,
-        "record_id": record_id,
+        **workflow_ref,
         "scenario": scenario,
     }

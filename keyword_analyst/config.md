@@ -7,7 +7,7 @@
 | GA4 Search/Traffic Data      | 사이트 유입 검색어, 세션 데이터 | GA4 Data API (읽기 전용)       |
 | Naver 검색광고 키워드 리포트 | 연관 검색어, 검색량             | Naver SearchAd API (읽기 전용) |
 | Google Ads 키워드 플래너     | 검색량, 경쟁도                  | Google Ads API (읽기 전용)     |
-| agent_memory (내부 DB)       | 최근 7일 제출/반려 이력         | 내부 조회 전용                 |
+| work_items / approval_decisions | 최근 7일 제출/반려 이력 | 내부 조회 전용 |
 
 > 모든 입력 소스는 **읽기 전용**이다. 이 직원은 위 소스에 쓰기 작업을 하지 않는다.
 
@@ -17,7 +17,7 @@
 | ------------------------- | ----------------------------------------------------------------- | ---------------------------- |
 | `content_editor.inbox`    | compliance_risk = low/medium, 정상 승인된 키워드                  | 자동 handoff                 |
 | `compliance_review.queue` | compliance_risk = high, 또는 미성년자/3자 특정 가능성 있는 키워드 | 자동 큐 등록, 사람 검토 대기 |
-| `agent_memory`            | 모든 작업 결과 (승인/반려 무관)                                   | 자동 기록                    |
+| `work_items` / `audit_events` | 모든 작업 결과와 승인 이력 | 자동 기록 |
 | `audit_log`               | 모든 판단 근거 및 모델/프롬프트 버전                              | 자동 기록 (변경 불가)        |
 
 ## 권한 경계

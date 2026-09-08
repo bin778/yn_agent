@@ -3,19 +3,20 @@
 routine.yaml의 task: draft_content / steps 를 코드로 옮긴 것.
 
 steps 매핑:
-  fetch_keyword → content_editor.inbox(승인된 키워드) / record_id 조회
+  fetch_keyword → 승인 후 생성된 draft_content handoff 조회
   draft         → call_gemini_structured()
   self_flag     → LLM이 flagged_claims / sensitive_flags 채움
   classify      → flagged 또는 sensitive → human_review.queue
                   else                 → publish_queue
-  record        → db.record_run()
+  record        → workflow.create_work_item() + 역할별 승인 요청
 """
 import json
 
 from ..loaders import build_system_prompt
 from ..llm_client import call_gemini_structured
 from ..schemas import ContentEditorOutput, KeywordItem
-from ..db import record_run, recent_rejections, get_record, list_approved_keywords_awaiting_draft
+from ..db import recent_rejections
+from ..workflow import claim_handoffs, complete_handoff, create_work_item
 from ..config import GEMINI_MODEL
 
 AGENT_ID = "content_editor"
@@ -26,7 +27,7 @@ def _format_rejections() -> str:
     if not rows:
         return "(최근 반려 이력 없음)"
     lines = []
-    for created_at, output_json, routed_to, human_decision in rows:
+    for created_at, output_json, routed_to, workflow_status in rows:
         try:
             output = json.loads(output_json)
             summary = f"{output.get('title', '?')} | flagged={output.get('flagged_claims', [])}"
@@ -42,10 +43,15 @@ def _keyword_payload_from_item(item: KeywordItem | dict) -> dict:
     return item
 
 
-def draft_content(keyword_item: KeywordItem | dict) -> dict:
+def _draft_content(
+    keyword_item: KeywordItem | dict,
+    *,
+    correlation_id: str | None = None,
+    db_path=None,
+) -> dict:
     """
     키워드 1건으로 초안을 작성하고 라우팅한다.
-    반환: {"item": ContentEditorOutput, "target": str, "record_id": int}
+    반환: {"item", "target", "work_item_id", "version", "request_id"}
     """
     payload = _keyword_payload_from_item(keyword_item)
     system_prompt = build_system_prompt(AGENT_ID)
@@ -74,35 +80,32 @@ SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초�
     else:
         target = "publish_queue"
 
-    record_id = record_run(
+    workflow_ref = create_work_item(
         agent_id=AGENT_ID,
         output=result.model_dump(),
         routed_to=target,
         model_version=GEMINI_MODEL,
         input_summary=result.target_keyword,
+        correlation_id=correlation_id,
+        db_path=db_path,
     )
-    return {"item": result, "target": target, "record_id": record_id}
+    return {"item": result, "target": target, **workflow_ref}
 
 
-def draft_content_from_record(keyword_record_id: int) -> dict:
-    """서연우 agent_memory record_id로부터 초안 작성."""
-    record = get_record(keyword_record_id)
-    if not record:
-        raise ValueError(f"record #{keyword_record_id}를 찾을 수 없습니다.")
-    if record["agent_id"] != "keyword_analyst":
-        raise ValueError(f"record #{keyword_record_id}는 keyword_analyst 결과가 아닙니다.")
-    if record["routed_to"] != "content_editor.inbox":
-        raise ValueError(
-            f"record #{keyword_record_id}는 content_editor.inbox 대상이 아닙니다 "
-            f"(routed_to={record['routed_to']})."
-        )
-    return draft_content(record["output"])
-
-
-def process_backlog(limit: int = 3) -> list[dict]:
-    """routine.yaml backlog_sweep: 승인됐지만 초안 없는 키워드를 처리."""
-    pending = list_approved_keywords_awaiting_draft(limit=limit)
+def process_backlog(limit: int = 3, *, db_path=None) -> list[dict]:
+    """승인 완료로 생성된 handoff만 원자적으로 claim해 처리한다."""
+    pending = claim_handoffs("draft_content", limit=limit, db_path=db_path)
     results = []
     for row in pending:
-        results.append(draft_content(row["output"]))
+        try:
+            result = _draft_content(
+                row["output"], correlation_id=row["correlation_id"], db_path=db_path
+            )
+        except Exception as exc:
+            complete_handoff(
+                row["handoff_id"], row["claim_token"], error=str(exc), db_path=db_path
+            )
+            raise
+        complete_handoff(row["handoff_id"], row["claim_token"], db_path=db_path)
+        results.append(result)
     return results

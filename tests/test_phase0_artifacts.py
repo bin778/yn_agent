@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from scripts.validate_phase0 import approval_is_valid, automated_errors, file_sha256
+from scripts.validate_phase1 import automated_errors as phase1_errors
 
 
 class Phase0ArtifactsTest(unittest.TestCase):
@@ -34,6 +35,9 @@ class Phase0ArtifactsTest(unittest.TestCase):
                 }
             )
         )
+
+    def test_phase1_contracts(self):
+        self.assertEqual([], phase1_errors())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,585 @@
+"""Platform-independent approval, acknowledgement, versioning, and handoff service."""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Literal
+
+from .db import get_conn, utc_iso, utc_now
+
+Decision = Literal["approved", "rejected", "revision_requested"]
+
+
+class WorkflowError(Exception):
+    """Base class for workflow contract failures."""
+
+
+class AuthorizationError(WorkflowError):
+    pass
+
+
+class InvalidTransitionError(WorkflowError):
+    pass
+
+
+class StaleActionError(WorkflowError):
+    pass
+
+
+class NotFoundError(WorkflowError):
+    pass
+
+
+@dataclass(frozen=True)
+class ActorContext:
+    actor_id: str
+    roles: frozenset[str]
+    verified: bool
+    is_admin: bool = False
+    platform: str = "internal"
+
+    @classmethod
+    def verified_actor(cls, actor_id: str, roles: Iterable[str], *, is_admin: bool = False,
+                       platform: str = "internal") -> "ActorContext":
+        return cls(actor_id, frozenset(roles), True, is_admin, platform)
+
+
+@dataclass(frozen=True)
+class ApprovalPolicy:
+    key: str
+    roles: tuple[str, ...]
+    ttl: dt.timedelta
+    handoff_type: str | None
+    handoff_target: str | None
+    acknowledgement_roles: tuple[str, ...] = ()
+    risk_level: str = "standard"
+    initial_status: str = "pending_approval"
+
+
+def _payload(output: dict | object) -> dict:
+    if isinstance(output, dict):
+        return output
+    if hasattr(output, "model_dump"):
+        return output.model_dump()
+    raise TypeError("output must be a dict or Pydantic model")
+
+
+def policy_for(agent_id: str, output_value: dict | object) -> ApprovalPolicy:
+    output = _payload(output_value)
+    if agent_id == "keyword_analyst":
+        high = output.get("compliance_risk") == "high"
+        return ApprovalPolicy(
+            "keyword_high" if high else "keyword_standard",
+            ("keyword_approver", "legal_compliance") if high else ("keyword_approver",),
+            dt.timedelta(days=3 if high else 7), "draft_content", "content_editor.inbox",
+            risk_level="high" if high else "standard",
+        )
+    if agent_id == "content_editor":
+        high = bool(output.get("flagged_claims") or output.get("sensitive_flags"))
+        return ApprovalPolicy(
+            "content_legal" if high else "content_standard",
+            ("content_approver", "legal_compliance") if high else ("content_approver",),
+            dt.timedelta(days=3 if high else 7), "queue_for_publish", "publish_queue",
+            risk_level="high" if high else "standard",
+        )
+    if agent_id == "performance_analyst":
+        if output.get("halted"):
+            return ApprovalPolicy("performance_halted", (), dt.timedelta(days=1), None, None,
+                                  risk_level="high", initial_status="halted")
+        roles = ["performance_approver"]
+        if abs(int(output.get("adjustment_percentage", 0))) > 20 or output.get("action") == "PAUSE":
+            roles.append("operations_owner")
+        if output.get("sensitive_keyword") or output.get("category") in {"성범죄", "미성년자"}:
+            roles.append("legal_compliance")
+        return ApprovalPolicy(
+            "performance_" + "_".join(roles[1:] or ["standard"]), tuple(roles),
+            dt.timedelta(hours=24), "queue_for_execution_review", "performance_execution_pending",
+            risk_level="high" if len(roles) > 1 else "standard",
+        )
+    if agent_id == "data_assistant":
+        status = output.get("status_summary", "Normal")
+        roles: list[str] = []
+        if status in {"Warning", "Critical"}:
+            roles.append("data_owner")
+        if output.get("privacy_flags"):
+            roles.append("privacy_officer")
+        roles = list(dict.fromkeys(roles))
+        return ApprovalPolicy(
+            "data_" + status.lower(), (), dt.timedelta(days=7), None, None, tuple(roles),
+            risk_level="high" if status == "Critical" or output.get("privacy_flags") else "standard",
+            initial_status="acknowledgement_pending" if roles else "recorded",
+        )
+    raise ValueError(f"unknown agent_id: {agent_id}")
+
+
+def _audit(conn, *, event_type: str, work: dict, actor_type: str, actor_id: str,
+           platform: str, previous_state: str | None, new_state: str | None,
+           reason: str | None, correlation_id: str) -> None:
+    conn.execute(
+        """INSERT INTO audit_events (
+               event_id, event_type, work_item_id, work_item_version, agent_id,
+               actor_type, actor_id, platform, model_id, occurred_at,
+               previous_state, new_state, reason, correlation_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (str(uuid.uuid4()), event_type, work["work_item_id"], work["version"], work["agent_id"],
+         actor_type, actor_id, platform, work.get("model_version"), utc_iso(), previous_state,
+         new_state, reason, correlation_id),
+    )
+
+
+def create_work_item(*, agent_id: str, output: dict | object, routed_to: str,
+                     model_version: str | None, input_summary: str,
+                     created_by: str | None = None, correlation_id: str | None = None,
+                     work_item_id: str | None = None, version: int = 1,
+                     parent_version: int | None = None, creation_reason: str | None = None,
+                     now: dt.datetime | None = None,
+                     db_path: str | Path | None = None) -> dict:
+    payload = _payload(output)
+    policy = policy_for(agent_id, payload)
+    current_time = now or utc_now()
+    work_id = work_item_id or str(uuid.uuid4())
+    correlation = correlation_id or str(uuid.uuid4())
+    creator = created_by or f"agent:{agent_id}"
+    request_id = str(uuid.uuid4()) if policy.roles else None
+
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        work = {"work_item_id": work_id, "version": version, "agent_id": agent_id,
+                "model_version": model_version}
+        conn.execute(
+            """INSERT INTO work_items (
+                   work_item_id, version, agent_id, created_at, created_by, output_json,
+                   routed_to, risk_level, status, model_version, input_summary,
+                   correlation_id, parent_version
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (work_id, version, agent_id, utc_iso(current_time), creator,
+             json.dumps(payload, ensure_ascii=False), routed_to, policy.risk_level,
+             policy.initial_status, model_version, input_summary, correlation, parent_version),
+        )
+        event_type = "work_item.revision_created" if parent_version else "work_item.created"
+        _audit(conn, event_type=event_type, work=work, actor_type="agent",
+               actor_id=creator, platform="internal", previous_state=None,
+               new_state=policy.initial_status, reason=creation_reason, correlation_id=correlation)
+        if request_id:
+            conn.execute(
+                """INSERT INTO approval_requests (
+                       request_id, work_item_id, work_item_version, policy_key, status,
+                       created_at, expires_at, requested_by, correlation_id, distinct_approvers
+                   ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, 1)""",
+                (request_id, work_id, version, policy.key, utc_iso(current_time),
+                 utc_iso(current_time + policy.ttl), creator, correlation),
+            )
+            conn.executemany(
+                "INSERT INTO approval_requirements (request_id, role_key, approvals_required) VALUES (?, ?, 1)",
+                [(request_id, role) for role in policy.roles],
+            )
+            _audit(conn, event_type="approval.requested", work=work, actor_type="system",
+                   actor_id="workflow", platform="internal", previous_state=None,
+                   new_state="pending", reason=policy.key, correlation_id=correlation)
+        conn.executemany(
+            """INSERT INTO acknowledgement_requirements
+                   (work_item_id, work_item_version, role_key, acknowledgements_required)
+               VALUES (?, ?, ?, 1)""",
+            [(work_id, version, role) for role in policy.acknowledgement_roles],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"work_item_id": work_id, "version": version, "request_id": request_id,
+            "status": policy.initial_status, "policy_key": policy.key,
+            "required_roles": list(policy.roles),
+            "acknowledgement_roles": list(policy.acknowledgement_roles),
+            "correlation_id": correlation}
+
+
+def _require_actor(actor: ActorContext) -> None:
+    if not actor.verified or not actor.actor_id or not actor.roles:
+        raise AuthorizationError("actor identity and roles must be verified")
+
+
+def get_approval_state(request_id: str, db_path: str | Path | None = None) -> dict:
+    conn = get_conn(db_path)
+    request = conn.execute("SELECT * FROM approval_requests WHERE request_id=?", (request_id,)).fetchone()
+    if request is None:
+        conn.close()
+        raise NotFoundError(f"approval request not found: {request_id}")
+    requirements = conn.execute(
+        "SELECT role_key, approvals_required FROM approval_requirements WHERE request_id=? ORDER BY role_key",
+        (request_id,),
+    ).fetchall()
+    counts = {row["actor_role"]: row["count"] for row in conn.execute(
+        """SELECT actor_role, COUNT(*) count FROM approval_decisions
+           WHERE request_id=? AND decision='approved' GROUP BY actor_role""", (request_id,)
+    ).fetchall()}
+    decisions = [dict(row) for row in conn.execute(
+        "SELECT actor_id, actor_role, decision, reason, decided_at FROM approval_decisions WHERE request_id=? ORDER BY decided_at",
+        (request_id,),
+    ).fetchall()]
+    conn.close()
+    return {"request_id": request_id, "work_item_id": request["work_item_id"],
+            "version": request["work_item_version"], "status": request["status"],
+            "expires_at": request["expires_at"],
+            "requirements": [{"role": row["role_key"], "required": row["approvals_required"],
+                              "approved": counts.get(row["role_key"], 0)} for row in requirements],
+            "decisions": decisions}
+
+
+def decide(*, request_id: str, expected_version: int, actor: ActorContext,
+           acting_role: str, decision: Decision, reason: str | None = None,
+           correlation_id: str | None = None, now: dt.datetime | None = None,
+           db_path: str | Path | None = None) -> dict:
+    _require_actor(actor)
+    if acting_role not in actor.roles:
+        raise AuthorizationError(f"actor is not verified for role: {acting_role}")
+    if decision not in {"approved", "rejected", "revision_requested"}:
+        raise ValueError(f"unsupported decision: {decision}")
+    if decision in {"rejected", "revision_requested"} and not (reason or "").strip():
+        raise ValueError(f"reason is required for {decision}")
+
+    current_time = now or utc_now()
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        request = conn.execute("SELECT * FROM approval_requests WHERE request_id=?", (request_id,)).fetchone()
+        if request is None:
+            raise NotFoundError(f"approval request not found: {request_id}")
+        if request["work_item_version"] != expected_version:
+            raise StaleActionError("approval action targets an old work item version")
+        existing = conn.execute(
+            "SELECT * FROM approval_decisions WHERE request_id=? AND actor_id=?",
+            (request_id, actor.actor_id),
+        ).fetchone()
+        if existing is not None:
+            if existing["actor_role"] == acting_role and existing["decision"] == decision:
+                conn.rollback()
+                state = get_approval_state(request_id, db_path)
+                state["duplicate"] = True
+                return state
+            raise InvalidTransitionError("actor has already decided this request")
+        if request["status"] != "pending":
+            raise StaleActionError(f"approval request is already {request['status']}")
+        work = conn.execute(
+            "SELECT * FROM work_items WHERE work_item_id=? AND version=?",
+            (request["work_item_id"], expected_version),
+        ).fetchone()
+        if current_time >= dt.datetime.fromisoformat(request["expires_at"]):
+            conn.execute("UPDATE approval_requests SET status='expired', resolved_at=? WHERE request_id=?",
+                         (utc_iso(current_time), request_id))
+            conn.execute("UPDATE work_items SET status='expired' WHERE work_item_id=? AND version=?",
+                         (request["work_item_id"], expected_version))
+            _audit(conn, event_type="approval.expired", work=dict(work), actor_type="system",
+                   actor_id="workflow", platform="internal", previous_state="pending",
+                   new_state="expired", reason="approval TTL elapsed",
+                   correlation_id=request["correlation_id"])
+            conn.commit()
+            raise StaleActionError("approval request has expired")
+        requirement = conn.execute(
+            "SELECT 1 FROM approval_requirements WHERE request_id=? AND role_key=?",
+            (request_id, acting_role),
+        ).fetchone()
+        if requirement is None:
+            raise AuthorizationError(f"role is not required for this request: {acting_role}")
+
+        correlation = correlation_id or request["correlation_id"]
+        conn.execute(
+            """INSERT INTO approval_decisions
+                   (decision_id, request_id, actor_id, actor_role, decision, reason, decided_at, correlation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), request_id, actor.actor_id, acting_role, decision,
+             reason, utc_iso(current_time), correlation),
+        )
+        _audit(conn, event_type=f"approval.decision.{decision}", work=dict(work),
+               actor_type="human", actor_id=actor.actor_id, platform=actor.platform,
+               previous_state="pending", new_state=decision if decision != "approved" else "pending",
+               reason=reason, correlation_id=correlation)
+
+        final_status = "pending"
+        if decision in {"rejected", "revision_requested"}:
+            final_status = decision
+        else:
+            missing = conn.execute(
+                """SELECT COUNT(*) FROM approval_requirements r
+                   WHERE r.request_id=? AND (
+                       SELECT COUNT(*) FROM approval_decisions d
+                       WHERE d.request_id=r.request_id AND d.actor_role=r.role_key AND d.decision='approved'
+                   ) < r.approvals_required""", (request_id,),
+            ).fetchone()[0]
+            if missing == 0:
+                final_status = "approved"
+
+        if final_status != "pending":
+            conn.execute(
+                "UPDATE approval_requests SET status=?, resolved_at=? WHERE request_id=? AND status='pending'",
+                (final_status, utc_iso(current_time), request_id),
+            )
+            conn.execute("UPDATE work_items SET status=? WHERE work_item_id=? AND version=?",
+                         (final_status, request["work_item_id"], expected_version))
+            _audit(conn, event_type=f"approval.request.{final_status}", work=dict(work),
+                   actor_type="system", actor_id="workflow", platform="internal",
+                   previous_state="pending", new_state=final_status, reason=reason,
+                   correlation_id=correlation)
+            if final_status == "approved":
+                policy = policy_for(work["agent_id"], json.loads(work["output_json"]))
+                if policy.handoff_type and policy.handoff_target:
+                    inserted = conn.execute(
+                        """INSERT OR IGNORE INTO handoff_jobs
+                               (handoff_id, work_item_id, work_item_version, handoff_type,
+                                target, status, created_at, correlation_id)
+                           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                        (str(uuid.uuid4()), work["work_item_id"], expected_version,
+                         policy.handoff_type, policy.handoff_target, utc_iso(current_time), correlation),
+                    ).rowcount
+                    if inserted:
+                        _audit(conn, event_type="handoff.queued", work=dict(work),
+                               actor_type="system", actor_id="workflow", platform="internal",
+                               previous_state=None, new_state="pending", reason=policy.handoff_type,
+                               correlation_id=correlation)
+        conn.commit()
+    except StaleActionError:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_approval_state(request_id, db_path)
+
+
+def acknowledge(*, work_item_id: str, expected_version: int, actor: ActorContext,
+                acting_role: str, correlation_id: str | None = None,
+                db_path: str | Path | None = None) -> dict:
+    _require_actor(actor)
+    if acting_role not in actor.roles:
+        raise AuthorizationError(f"actor is not verified for role: {acting_role}")
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        work = conn.execute("SELECT * FROM work_items WHERE work_item_id=? AND version=?",
+                            (work_item_id, expected_version)).fetchone()
+        if work is None:
+            raise NotFoundError(f"work item not found: {work_item_id} v{expected_version}")
+        if work["status"] not in {"acknowledgement_pending", "acknowledged"}:
+            raise StaleActionError(f"work item does not accept acknowledgements: {work['status']}")
+        requirement = conn.execute(
+            """SELECT 1 FROM acknowledgement_requirements
+               WHERE work_item_id=? AND work_item_version=? AND role_key=?""",
+            (work_item_id, expected_version, acting_role),
+        ).fetchone()
+        if requirement is None:
+            raise AuthorizationError(f"role is not required to acknowledge: {acting_role}")
+        existing = conn.execute(
+            "SELECT * FROM acknowledgements WHERE work_item_id=? AND work_item_version=? AND actor_id=?",
+            (work_item_id, expected_version, actor.actor_id),
+        ).fetchone()
+        if existing:
+            if existing["actor_role"] != acting_role:
+                raise InvalidTransitionError("actor has already acknowledged under another role")
+            conn.rollback()
+            return {"work_item_id": work_item_id, "version": expected_version,
+                    "status": work["status"], "duplicate": True}
+        correlation = correlation_id or work["correlation_id"]
+        conn.execute(
+            """INSERT INTO acknowledgements
+                   (acknowledgement_id, work_item_id, work_item_version, actor_id,
+                    actor_role, acknowledged_at, correlation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), work_item_id, expected_version, actor.actor_id,
+             acting_role, utc_iso(), correlation),
+        )
+        missing = conn.execute(
+            """SELECT COUNT(*) FROM acknowledgement_requirements r
+               WHERE r.work_item_id=? AND r.work_item_version=? AND (
+                   SELECT COUNT(*) FROM acknowledgements a
+                   WHERE a.work_item_id=r.work_item_id AND a.work_item_version=r.work_item_version
+                     AND a.actor_role=r.role_key
+               ) < r.acknowledgements_required""", (work_item_id, expected_version),
+        ).fetchone()[0]
+        new_status = "acknowledged" if missing == 0 else "acknowledgement_pending"
+        conn.execute("UPDATE work_items SET status=? WHERE work_item_id=? AND version=?",
+                     (new_status, work_item_id, expected_version))
+        _audit(conn, event_type="data.acknowledged", work=dict(work), actor_type="human",
+               actor_id=actor.actor_id, platform=actor.platform, previous_state=work["status"],
+               new_state=new_status, reason=acting_role, correlation_id=correlation)
+        conn.commit()
+        return {"work_item_id": work_item_id, "version": expected_version, "status": new_status}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def cancel_request(request_id: str, actor: ActorContext, *, reason: str,
+                   db_path: str | Path | None = None) -> dict:
+    _require_actor(actor)
+    if not reason.strip():
+        raise ValueError("reason is required for cancellation")
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        request = conn.execute("SELECT * FROM approval_requests WHERE request_id=?", (request_id,)).fetchone()
+        if request is None:
+            raise NotFoundError(f"approval request not found: {request_id}")
+        if request["status"] != "pending":
+            raise InvalidTransitionError(f"cannot cancel {request['status']} request")
+        if not actor.is_admin and actor.actor_id != request["requested_by"]:
+            raise AuthorizationError("only the requester or an administrator can cancel")
+        work = conn.execute("SELECT * FROM work_items WHERE work_item_id=? AND version=?",
+                            (request["work_item_id"], request["work_item_version"])).fetchone()
+        conn.execute("UPDATE approval_requests SET status='cancelled', resolved_at=? WHERE request_id=?",
+                     (utc_iso(), request_id))
+        conn.execute("UPDATE work_items SET status='cancelled' WHERE work_item_id=? AND version=?",
+                     (request["work_item_id"], request["work_item_version"]))
+        _audit(conn, event_type="approval.request.cancelled", work=dict(work), actor_type="human",
+               actor_id=actor.actor_id, platform=actor.platform, previous_state="pending",
+               new_state="cancelled", reason=reason, correlation_id=request["correlation_id"])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_approval_state(request_id, db_path)
+
+
+def expire_pending(*, now: dt.datetime | None = None, db_path: str | Path | None = None) -> int:
+    current_time = now or utc_now()
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM approval_requests WHERE status='pending' AND expires_at<=?",
+            (utc_iso(current_time),),
+        ).fetchall()
+        for request in rows:
+            work = conn.execute("SELECT * FROM work_items WHERE work_item_id=? AND version=?",
+                                (request["work_item_id"], request["work_item_version"])).fetchone()
+            conn.execute("UPDATE approval_requests SET status='expired', resolved_at=? WHERE request_id=?",
+                         (utc_iso(current_time), request["request_id"]))
+            conn.execute("UPDATE work_items SET status='expired' WHERE work_item_id=? AND version=?",
+                         (request["work_item_id"], request["work_item_version"]))
+            _audit(conn, event_type="approval.expired", work=dict(work), actor_type="system",
+                   actor_id="workflow", platform="internal", previous_state="pending",
+                   new_state="expired", reason="approval TTL elapsed",
+                   correlation_id=request["correlation_id"])
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def create_revision(*, source_request_id: str, revised_output: dict | object,
+                    created_by: str, reason: str, model_version: str | None = None,
+                    db_path: str | Path | None = None) -> dict:
+    if not reason.strip():
+        raise ValueError("revision reason is required")
+    conn = get_conn(db_path)
+    request = conn.execute("SELECT * FROM approval_requests WHERE request_id=?", (source_request_id,)).fetchone()
+    if request is None:
+        conn.close()
+        raise NotFoundError(f"approval request not found: {source_request_id}")
+    if request["status"] != "revision_requested":
+        conn.close()
+        raise InvalidTransitionError("a new version requires revision_requested status")
+    old = conn.execute("SELECT * FROM work_items WHERE work_item_id=? AND version=?",
+                       (request["work_item_id"], request["work_item_version"])).fetchone()
+    latest = conn.execute("SELECT MAX(version) FROM work_items WHERE work_item_id=?",
+                          (request["work_item_id"],)).fetchone()[0]
+    conn.close()
+    if latest != old["version"]:
+        raise StaleActionError("a newer work item version already exists")
+    return create_work_item(
+        agent_id=old["agent_id"], output=revised_output, routed_to=old["routed_to"],
+        model_version=model_version or old["model_version"], input_summary=old["input_summary"],
+        created_by=created_by, correlation_id=old["correlation_id"],
+        work_item_id=old["work_item_id"], version=old["version"] + 1,
+        parent_version=old["version"], creation_reason=reason, db_path=db_path,
+    )
+
+
+def claim_handoffs(handoff_type: str, *, limit: int = 10,
+                   db_path: str | Path | None = None) -> list[dict]:
+    conn = get_conn(db_path)
+    claimed: list[dict] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """SELECT h.*, w.output_json, w.agent_id, w.routed_to
+               FROM handoff_jobs h JOIN work_items w
+                 ON w.work_item_id=h.work_item_id AND w.version=h.work_item_version
+               WHERE h.handoff_type=? AND h.status='pending'
+               ORDER BY h.created_at LIMIT ?""", (handoff_type, limit),
+        ).fetchall()
+        for row in rows:
+            token = str(uuid.uuid4())
+            if conn.execute(
+                """UPDATE handoff_jobs SET status='claimed', claimed_at=?, claim_token=?
+                   WHERE handoff_id=? AND status='pending'""",
+                (utc_iso(), token, row["handoff_id"]),
+            ).rowcount:
+                item = dict(row)
+                item["output"] = json.loads(item.pop("output_json"))
+                item["version"] = item["work_item_version"]
+                item["claim_token"] = token
+                claimed.append(item)
+                _audit(
+                    conn, event_type="handoff.claimed", work=item,
+                    actor_type="service", actor_id=f"consumer:{handoff_type}", platform="internal",
+                    previous_state="pending", new_state="claimed", reason=handoff_type,
+                    correlation_id=item["correlation_id"],
+                )
+        conn.commit()
+        return claimed
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def complete_handoff(handoff_id: str, claim_token: str, *, error: str | None = None,
+                     db_path: str | Path | None = None) -> None:
+    conn = get_conn(db_path)
+    status = "failed" if error else "completed"
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        handoff = conn.execute(
+            """SELECT h.*, w.agent_id, w.model_version FROM handoff_jobs h
+               JOIN work_items w ON w.work_item_id=h.work_item_id AND w.version=h.work_item_version
+               WHERE h.handoff_id=?""", (handoff_id,),
+        ).fetchone()
+        updated = conn.execute(
+            """UPDATE handoff_jobs SET status=?, completed_at=?, error=?
+               WHERE handoff_id=? AND status='claimed' AND claim_token=?""",
+            (status, utc_iso(), error, handoff_id, claim_token),
+        ).rowcount
+        if updated == 1:
+            work = dict(handoff)
+            work["version"] = work["work_item_version"]
+            _audit(
+                conn, event_type=f"handoff.{status}", work=work, actor_type="service",
+                actor_id=f"consumer:{handoff['handoff_type']}", platform="internal",
+                previous_state="claimed", new_state=status, reason=error,
+                correlation_id=handoff["correlation_id"],
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    if updated != 1:
+        raise StaleActionError("handoff is not owned by this claim")

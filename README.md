@@ -25,16 +25,15 @@
 yn_agent/
 ├── README.md                  ← 지금 보고 있는 문서
 ├── ORCHESTRATION.md            ← 4명이 어떻게 맞물리는지 전체 흐름
-├── bot/                        ← Discord 파일럿 봇 (4명 실행)
-│   └── SETUP.md                ← 시연 스크립트·채널·권한 체크리스트
+├── bot/                        ← Phase 1 플랫폼 독립 승인 엔진·4명 실행 로직
 ├── _shared/                    ← 4명 공통 참조 자료
 │   ├── knowledge/
 │   │   ├── compliance_rules.md
 │   │   └── domain_glossary.md
 │   ├── examples/
 │   │   └── few_shot_cases.md
-│   ├── queues.md               # 큐 ↔ Discord 채널 레지스트리
-│   └── roles.md                # 에스컬레이션 Discord role 정의
+│   ├── queues.md               # 플랫폼 독립 논리 큐 정의
+│   └── roles.md                # Human `role_key` 정의
 ├── docs/phase0/                ← 플랫폼 전환 전 워크플로·외부 실행 계약
 ├── evals/                      ← 코드 fixture, 법률 Golden Set 후보, 경계 사례와 평가 기준
 ├── scripts/validate_phase0.py  ← 자동 검증 및 다음 Phase 진입 Gate
@@ -50,16 +49,15 @@ yn_agent/
 
 1. 이 README.md (지금 이 문서)
 2. [ORCHESTRATION.md](./ORCHESTRATION.md) — 전체 그림
-3. **시연·로컬 실행**: [bot/SETUP.md](./bot/SETUP.md)
-4. 관심 있는 직원의 `SOUL.md` → `config.md` → `routine.yaml`
-5. `_shared/knowledge/`, `_shared/examples/` — 공통 판단 근거
+3. 관심 있는 직원의 `SOUL.md` → `config.md` → `routine.yaml`
+4. `_shared/knowledge/`, `_shared/examples/` — 공통 판단 근거
 
 ## 핵심 설계 원칙 (전체 공통)
 
 - **판단과 실행의 분리**: AI는 분석·제안·초안까지만 자율적으로 하고, 발행/집행은 항상 사람이 최종 승인한다.
 - **모르면 모른다고 한다**: 확신 없는 법률 사실, 통계, 판례는 절대 만들어내지 않고 flagged로 표시한다.
 - **보수적 기본값**: 애매하면 리스크를 낮게 잡지 않고 높게 잡아 사람 검토로 보낸다.
-- **감사 가능성**: 모든 직원의 모든 판단은 `audit_log`에 기록되어 나중에 추적 가능해야 한다.
+- **감사 가능성**: 모든 직원의 모든 판단은 `audit_events`에 append-only로 기록되어 나중에 추적 가능해야 한다.
 
 ## 현재 진행 상태
 
@@ -67,14 +65,14 @@ yn_agent/
 - [x] 공통 knowledge (컴플라이언스 규정, 도메인 용어집) 완결
 - [x] 공통 examples (경계 사례) 완결
 - [x] \_shared/queues.md, \_shared/roles.md
-- [x] Discord 파일럿 봇 (`bot/`) — 서연우·한도윤·오지민·정하준 + 슬래시커맨드/스케줄/승인 버튼
-- [x] 시연 스크립트·채널 권한 체크리스트 ([bot/SETUP.md](./bot/SETUP.md))
+- [x] Phase 1 역할별 승인 엔진 — 이력형 결정, 버전, TTL, idempotent handoff
+- [x] 기존 채팅 플랫폼 런타임 제거; Phase 3 Slack UI 연결 대기
 - [x] Phase 0 Engineering Gate — 구현 기준선·평가 후보·근거 PDF 무결성 검증
 - [ ] Release Human Gate — Slack 검토 화면 이후 제품·법률·개인정보·보안 담당 승인
 - [ ] 직원별 tools.md, evals/test_cases.md
 - [ ] 실데이터 API 연동 (현재 `USE_FAKE_DATA=true`)
 - [ ] 승인 후 실제 실행(CMS 발행 / Ads 반영)
-- [ ] Discord role ID 채우기 (`_shared/roles.md` — 서버에서 역할 생성 후)
+- [ ] Phase 3 Slack 사용자/채널과 `_shared/roles.md`, `_shared/queues.md` 매핑
 
 ## 변경 관리
 
@@ -101,4 +99,13 @@ python scripts/validate_phase0.py --gate
 
 ```bash
 python scripts/validate_phase0.py --release-gate
+```
+
+## Phase 1 검증
+
+역할별 승인, 다중 승인, 버전, 만료, 데이터 확인, handoff와 기존 플랫폼 제거를 검증합니다.
+
+```bash
+python scripts/validate_phase1.py --gate
+python -m unittest discover -v
 ```

@@ -7,7 +7,7 @@
 | `content_editor.inbox`          | 서연우가 넘긴 승인된 키워드 후보 (keyword, urgency_level, intent_type 포함) | 내부 큐 (읽기) |
 | `knowledge/compliance_rules.md` | 금지 표현, 광고규정 근거                                                    | 읽기 전용      |
 | `knowledge/domain_glossary.md`  | 법률 용어 정의                                                              | 읽기 전용      |
-| `agent_memory`                  | 최근 반려된 콘텐츠 이력 및 사유                                             | 내부 조회 전용 |
+| `work_items` / `approval_decisions` | 최근 반려된 콘텐츠 이력 및 사유 | 내부 조회 전용 |
 
 > 이 직원은 외부 데이터 소스(GA4, Ads API 등)에 직접 접근하지 않는다. 필요한 경우 서연우에게 `content_editor.needs_keyword` 이벤트로 요청한다.
 
@@ -17,7 +17,7 @@
 | -------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | `human_review.queue` | `flagged_claims`가 하나라도 존재 / 미성년자·피해자 관련 주제 / 특정 형량·처벌 수위 언급 | 자동 큐 등록, 변호사 검수 필수                               |
 | `publish_queue`      | flagged_claims 없음 + 위 조건 미해당                                                    | 자동 handoff (단, 이 단계도 실제 발행은 별도 승인 후 실행됨) |
-| `agent_memory`       | 모든 초안 결과                                                                          | 자동 기록                                                    |
+| `work_items` / `audit_events` | 모든 초안 결과와 승인 이력 | 자동 기록 |
 | `audit_log`          | 판단 근거, 모델/프롬프트 버전                                                           | 자동 기록 (변경 불가)                                        |
 
 ## 권한 경계
