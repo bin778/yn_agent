@@ -1,0 +1,31 @@
+version: 1
+phase: 0
+status: deferred_until_slack_review
+
+artifacts:
+  - id: workflow_contract
+    path: docs/phase0/workflow_contract.md
+    approvals:
+      - { role: product_owner, status: pending, reviewer: null, reviewed_at: null }
+      - { role: legal_compliance, status: pending, reviewer: null, reviewed_at: null }
+
+  - id: execution_policy
+    path: docs/phase0/execution_policy.md
+    approvals:
+      - { role: product_owner, status: pending, reviewer: null, reviewed_at: null }
+      - { role: security_owner, status: pending, reviewer: null, reviewed_at: null }
+      - { role: legal_compliance, status: pending, reviewer: null, reviewed_at: null }
+
+  - id: evaluation_rubric
+    path: evals/rubric.yaml
+    approvals:
+      - { role: product_owner, status: pending, reviewer: null, reviewed_at: null }
+      - { role: legal_compliance, status: pending, reviewer: null, reviewed_at: null }
+      - { role: privacy_officer, status: pending, reviewer: null, reviewed_at: null }
+
+instructions:
+  - 이 파일은 Phase 0 Engineering Gate를 막지 않으며 Slack 검토 화면 이후 Release Gate에서 사용한다.
+  - 승인자는 자신이 검토한 항목의 status를 approved 또는 rejected로 변경한다.
+  - approved/rejected에는 reviewer와 reviewed_at을 반드시 기록한다.
+  - rejected인 경우 note에 수정 요구사항을 기록한다.
+  - 모든 필수 승인이 approved여야 Phase 0 Gate를 통과한다.

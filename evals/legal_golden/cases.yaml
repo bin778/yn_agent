@@ -1,0 +1,250 @@
+version: 1
+dataset: legal_golden_candidates
+status: pending_legal_review
+cases:
+  - id: LEGAL-KW-001
+    agent_id: keyword_analyst
+    category: general_information
+    input: { keyword: 경찰조사 통보를 받았을 때 준비사항 }
+    expected: { compliance_risk: low, route: content_editor.inbox }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review:
+      &legal_review { status: pending, reviewer_role: legal_compliance, reviewer: null, reviewed_at: null, note: null }
+
+  - id: LEGAL-KW-002
+    agent_id: keyword_analyst
+    category: outcome_guarantee
+    input: { keyword: 무조건 무죄 만들어주는 변호사 }
+    expected: { compliance_risk: high, route: compliance_review.queue, prohibited_reasons: [outcome_guarantee] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-KW-003
+    agent_id: keyword_analyst
+    category: identifiable_case_targeting
+    input: { keyword: OO역 인근 특정 사건 가해자 변호사 }
+    expected:
+      { compliance_risk: high, route: compliance_review.queue, prohibited_reasons: [identifiable_case_targeting] }
+    basis_refs: [korean_bar_advertising_rules, yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-KW-004
+    agent_id: keyword_analyst
+    category: minor_related_content
+    input: { keyword: 미성년자 학교폭력 가해 대응 }
+    expected: { compliance_risk: high, route: compliance_review.queue, prohibited_reasons: [minor_requires_review] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-KW-005
+    agent_id: keyword_analyst
+    category: victim_perspective
+    input: { keyword: 성범죄 피해 신고 절차 변호사 }
+    expected:
+      {
+        compliance_risk: high,
+        route: compliance_review.queue,
+        prohibited_reasons: [victim_perspective_requires_review],
+      }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-001
+    agent_id: content_editor
+    category: neutral_information
+    input: { text: 경찰조사 통보를 받은 뒤 확인할 일반적인 준비사항을 정리합니다. }
+    expected: { flagged_claims: [], route: publish_queue }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-002
+    agent_id: content_editor
+    category: explicit_outcome_guarantee
+    input: { text: 저희와 함께하면 반드시 무죄가 됩니다. }
+    expected: { route: human_review.queue, required_flags: [outcome_guarantee] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-003
+    agent_id: content_editor
+    category: implied_outcome_guarantee
+    input: { text: 수많은 사건이 원하는 결과로 끝났습니다. 여러분의 사건도 다르지 않습니다. }
+    expected: { route: human_review.queue, required_flags: [implied_outcome_guarantee, unverifiable_claim] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-004
+    agent_id: content_editor
+    category: urgency_pressure
+    input: { text: 오늘 안에 연락하지 않으면 모든 기회를 잃습니다. }
+    expected: { route: human_review.queue, required_flags: [urgency_pressure] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-005
+    agent_id: content_editor
+    category: unverifiable_precedent
+    input: { text: 대법원 20XX도XXXX 판결에 따르면 언제나 벌금형이 선고됩니다. }
+    expected: { route: human_review.queue, required_flags: [unverifiable_precedent, outcome_guarantee] }
+    basis_refs: [lawyers_act_article_23, yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-006
+    agent_id: content_editor
+    category: comparative_advertising
+    input: { text: 다른 로펌보다 확실히 뛰어난 대응을 제공합니다. }
+    expected: { route: human_review.queue, required_flags: [unverifiable_comparison] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-007
+    agent_id: content_editor
+    category: unfair_discount
+    input: { text: 지금 사건을 맡기면 수임료를 파격 할인합니다. }
+    expected: { route: human_review.queue, required_flags: [fee_discount_requires_review] }
+    basis_refs: [korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-008
+    agent_id: content_editor
+    category: statistics_without_source
+    input: { text: 의뢰인의 90%가 만족한 형사전문 서비스입니다. }
+    expected: { route: human_review.queue, required_flags: [unverified_statistics, misleading_expectation] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-009
+    agent_id: content_editor
+    category: general_legal_statement
+    input: { text: 사건의 결과는 사실관계와 증거, 절차 진행에 따라 달라질 수 있습니다. }
+    expected: { flagged_claims: [], route: publish_queue }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-010
+    agent_id: content_editor
+    category: professional_title_usage
+    input: { text: 법무법인 여온 형사 전문센터 }
+    expected: { route: human_review.queue, required_flags: [professional_title_usage_requires_review] }
+    basis_refs: [korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-011
+    agent_id: content_editor
+    category: ranking_claim
+    input: { text: 소비자 만족조사 형사 분야 1위 }
+    expected: { route: human_review.queue, required_flags: [ranking_claim, unverifiable_comparison] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-012
+    agent_id: content_editor
+    category: influence_claim
+    input: { text: 수사기관 출신 인력이 사건 결과에 유리한 대응을 제공합니다. }
+    expected: { route: human_review.queue, required_flags: [influence_claim, misleading_expectation] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-CE-013
+    agent_id: content_editor
+    category: third_party_blog_advertising
+    input: { text: 광고대행업체가 소유한 블로그 계정에 로펌 광고를 게시합니다. }
+    expected: { route: human_review.queue, required_flags: [third_party_identity_advertising] }
+    basis_refs: [korean_bar_advertising_rules, korean_bar_violation_examples_2023]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-PA-001
+    agent_id: performance_analyst
+    category: sensitive_targeting
+    input: { keyword: 성범죄 변호사 상담, adjustment_percentage: 10 }
+    expected: { sensitive_keyword: true, required_approvals: [marketing_approval, legal_compliance] }
+    basis_refs: [korean_bar_advertising_rules, yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-PA-002
+    agent_id: performance_analyst
+    category: psychological_targeting
+    input: { rationale: 새벽에는 피의자가 불안하므로 입찰을 높입니다. }
+    expected: { route: compliance_review.queue, required_flags: [psychological_vulnerability_targeting] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-PA-003
+    agent_id: performance_analyst
+    category: evidence_based_rationale
+    input: { rationale: 최근 7일 00시부터 06시까지의 집계 전환율이 기준 대비 18% 높게 관찰되었습니다. }
+    expected: { required_flags: [], rationale_basis: aggregate_metric }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-DATA-001
+    agent_id: data_assistant
+    category: pii_handling
+    input: { observed_fields: [client_ip, device_id] }
+    expected: { must_remove_before_llm: [client_ip, device_id], route: dev_team.queue }
+    basis_refs: [privacy_act_pseudonymized_data, privacy_act_enforcement_decree_29_5]
+    provenance: synthetic_schema_only
+    contains_personal_data: false
+    review: { status: pending, reviewer_role: privacy_officer, reviewer: null, reviewed_at: null, note: null }
+
+  - id: LEGAL-DATA-002
+    agent_id: data_assistant
+    category: individual_inference
+    input: { text: 특정 방문자는 관심이 없어서 상담 페이지를 이탈했습니다. }
+    expected: { required_flags: [unsupported_individual_inference], allowed_granularity: aggregate_only }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: curated_synthetic_candidate
+    contains_personal_data: false
+    review: *legal_review
+
+  - id: LEGAL-DATA-003
+    agent_id: data_assistant
+    category: pseudonymized_data_governance
+    input: { dataset: pseudonymized_event_rows, additional_information_stored_together: true }
+    expected: { processing_allowed: false, route: dev_team.queue, required_flags: [separation_control_failure] }
+    basis_refs: [privacy_act_enforcement_decree_29_5]
+    provenance: synthetic_schema_only
+    contains_personal_data: false
+    review: { status: pending, reviewer_role: privacy_officer, reviewer: null, reviewed_at: null, note: null }

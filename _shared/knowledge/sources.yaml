@@ -1,0 +1,132 @@
+version: 1
+last_updated_at: '2026-09-08'
+status: implementation_baseline
+
+sources:
+  - id: lawyers_act_article_23
+    title: 변호사법 제23조(광고)
+    authority: 국가법령정보센터
+    source_type: statute
+    url: https://www.law.go.kr/LSW/lsInfoP.do?efYd=20210105&lsiSeq=228089
+    jurisdiction: KR
+    effective_date: null
+    last_checked_at: '2026-09-08'
+    affects:
+      - misleading_advertising
+      - outcome_guarantee
+      - comparison_or_defamation
+    review:
+      status: pending
+      reviewer_role: legal_compliance
+      reviewer: null
+      reviewed_at: null
+      note: 현재 시행본 URL과 시행일을 법률 담당자가 확정해야 한다.
+
+  - id: korean_bar_advertising_rules
+    title: 변호사 광고에 관한 규정
+    authority: 대한변호사협회
+    source_type: professional_rule
+    url: https://www.koreanbar.or.kr/pages/board/law_view.asp?category=3&page=1&searchstr=%EA%B4%91%EA%B3%A0&seq=14402&types=6
+    jurisdiction: KR
+    revision_date: '2025-02-06'
+    promulgated_at: '2025-02-10'
+    effective_date: null
+    last_checked_at: '2026-09-08'
+    affects:
+      - outcome_guarantee
+      - direct_solicitation
+      - unfair_discount
+      - paid_referral
+    review:
+      status: pending
+      reviewer_role: legal_compliance
+      reviewer: null
+      reviewed_at: null
+      note: 첨부 규정 PDF의 시행 조항과 현재 적용 조문은 Slack 검토 단계에서 확정한다.
+
+  - id: korean_bar_violation_examples_2023
+    title: 변호사 광고에 관한 규정 주요 위반 사례
+    authority: 대한변호사협회
+    source_type: official_guidance
+    url: https://koreanbar.or.kr/pages/news/view.asp?seq=13241&types=1
+    access: 안내 게시글은 직접 접근이 제한될 수 있어 첨부 PDF를 내부 근거 아티팩트로 고정한다.
+    jurisdiction: KR
+    published_at: '2023-11-28'
+    effective_date: null
+    last_checked_at: '2026-09-08'
+    artifact:
+      path: _shared/knowledge/source_docs/korean_bar_violation_examples_2023.pdf
+      media_type: application/pdf
+      pages: 10
+      sha256: 01fdc401c50dd71d7d106379b73b8e3ab90b200dcf41a2d03bd3165be6154967
+      distribution_scope: internal_project
+    affects:
+      - unfair_discount
+      - professional_title_usage
+      - ranking_claims
+      - influence_claims
+      - third_party_blog_advertising
+    review:
+      status: pending
+      reviewer_role: legal_compliance
+      reviewer: null
+      reviewed_at: null
+      note: 2023 사례집이므로 2025 규정 원문과의 조문 대응은 Slack 검토 단계에서 확정한다.
+
+  - id: privacy_act_pseudonymized_data
+    title: 개인정보 보호법 제28조의2부터 제28조의5
+    authority: 국가법령정보센터
+    source_type: statute
+    url: https://www.law.go.kr/lsLinkCommonInfo.do?chrClsCd=010202&lsJoLnkSeq=1029334887
+    jurisdiction: KR
+    effective_date: '2025-10-02'
+    last_checked_at: '2026-09-08'
+    affects:
+      - pseudonymized_data
+      - reidentification_prohibition
+      - processing_records
+    review:
+      status: pending
+      reviewer_role: privacy_officer
+      reviewer: null
+      reviewed_at: null
+      note: Hermes 평가 데이터 적용 범위와 처리 근거를 개인정보 담당자가 확정해야 한다.
+
+  - id: privacy_act_enforcement_decree_29_5
+    title: 개인정보 보호법 시행령 제29조의5(가명정보에 대한 안전성 확보 조치)
+    authority: 국가법령정보센터
+    source_type: enforcement_decree
+    url: https://www.law.go.kr/LSW/lsLinkCommonInfo.do?chrClsCd=010202&lspttninfSeq=159009
+    jurisdiction: KR
+    effective_date: '2026-05-19'
+    last_checked_at: '2026-09-08'
+    affects:
+      - access_control
+      - separation_of_additional_information
+      - pseudonymized_data_records
+    review:
+      status: pending
+      reviewer_role: privacy_officer
+      reviewer: null
+      reviewed_at: null
+      note: 평가 데이터에 가명정보를 쓰는 경우에만 적용 여부를 확정한다.
+
+  - id: yeoon_internal_conservative_policy
+    title: 여온 마케팅 AI 보수적 라우팅 내부 정책
+    authority: 법무법인 여온
+    source_type: internal_policy
+    url: null
+    jurisdiction: internal
+    effective_date: null
+    last_checked_at: '2026-09-08'
+    affects:
+      - minor_related_content
+      - victim_perspective
+      - urgency_pressure
+      - sensitive_targeting
+    review:
+      status: pending
+      reviewer_role: legal_compliance
+      reviewer: null
+      reviewed_at: null
+      note: 법적 의무와 내부 보수 정책을 구분해 승인해야 한다.

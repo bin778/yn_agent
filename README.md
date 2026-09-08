@@ -35,6 +35,9 @@ yn_agent/
 │   │   └── few_shot_cases.md
 │   ├── queues.md               # 큐 ↔ Discord 채널 레지스트리
 │   └── roles.md                # 에스컬레이션 Discord role 정의
+├── docs/phase0/                ← 플랫폼 전환 전 워크플로·외부 실행 계약
+├── evals/                      ← 코드 fixture, 법률 Golden Set 후보, 경계 사례와 평가 기준
+├── scripts/validate_phase0.py  ← 자동 검증 및 다음 Phase 진입 Gate
 └── {agent_name}/               # 직원별 폴더 (동일 구조 반복)
     ├── SOUL.md
     ├── config.md
@@ -66,6 +69,8 @@ yn_agent/
 - [x] \_shared/queues.md, \_shared/roles.md
 - [x] Discord 파일럿 봇 (`bot/`) — 서연우·한도윤·오지민·정하준 + 슬래시커맨드/스케줄/승인 버튼
 - [x] 시연 스크립트·채널 권한 체크리스트 ([bot/SETUP.md](./bot/SETUP.md))
+- [x] Phase 0 Engineering Gate — 구현 기준선·평가 후보·근거 PDF 무결성 검증
+- [ ] Release Human Gate — Slack 검토 화면 이후 제품·법률·개인정보·보안 담당 승인
 - [ ] 직원별 tools.md, evals/test_cases.md
 - [ ] 실데이터 API 연동 (현재 `USE_FAKE_DATA=true`)
 - [ ] 승인 후 실제 실행(CMS 발행 / Ads 반영)
@@ -75,3 +80,25 @@ yn_agent/
 
 - SOUL.md / config.md / routine.yaml 수정 시, 관련된 `_shared/knowledge`, `_shared/examples`도 함께 검토합니다.
 - 변협 광고규정 등 외부 법령·규정이 개정되면 `_shared/knowledge/compliance_rules.md`를 최우선으로 갱신합니다.
+
+## Phase 0 검증
+
+자동 구조·근거·개인정보 패턴 검증:
+
+```bash
+python scripts/validate_phase0.py
+python -m unittest tests.test_phase0_artifacts
+```
+
+Phase 1 진입 Engineering Gate:
+
+```bash
+python scripts/validate_phase0.py --gate
+```
+
+법률 Golden Set과 정책 문서의 최종 사람 검수는 Slack 최소 구현물 확인 후 진행합니다.
+제한 파일럿 또는 운영 전에는 아래 Release Gate를 반드시 통과해야 합니다.
+
+```bash
+python scripts/validate_phase0.py --release-gate
+```

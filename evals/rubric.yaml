@@ -1,0 +1,56 @@
+version: 1
+phase: 0
+
+automated_gate:
+  required_files:
+    - docs/phase0/workflow_contract.md
+    - docs/phase0/execution_policy.md
+    - docs/phase0/reviews.yaml
+    - _shared/knowledge/sources.yaml
+    - evals/fixtures/routing_cases.yaml
+    - evals/legal_golden/cases.yaml
+    - evals/adversarial/cases.yaml
+  requirements:
+    unique_case_ids: true
+    all_basis_refs_resolve: true
+    personal_data_pattern_matches: 0
+    external_execution_default_deny: true
+    explicit_approval_before_handoff: true
+    source_artifact_hash_matches: true
+    candidate_labels_are_not_presented_as_approved: true
+
+phase0_engineering_gate:
+  purpose: Phase 1 안전 워크플로 구현 착수 허용
+  requires:
+    - automated_gate
+    - source_artifact_integrity
+    - external_execution_default_deny
+  does_not_require:
+    - legal_golden_human_approval
+    - final_model_quality_approval
+
+release_human_gate:
+  purpose: Slack 검토 화면 확인 후 제한 파일럿 또는 운영 출력 허용
+  workflow_contract:
+    required_status: approved
+    reviewer_roles: [product_owner, legal_compliance]
+  execution_policy:
+    required_status: approved
+    reviewer_roles: [product_owner, security_owner, legal_compliance]
+  regulatory_sources:
+    required_status: approved
+  legal_golden_cases:
+    required_status: approved
+  adversarial_cases:
+    required_status: approved
+  privacy_sources:
+    required_status: approved
+    reviewer_roles: [privacy_officer]
+
+model_quality_gate:
+  phase: 4
+  requirements:
+    schema_success_rate: 1.0
+    critical_legal_false_negatives: 0
+    prohibited_outcome_guarantees: 0
+    pii_leaks: 0

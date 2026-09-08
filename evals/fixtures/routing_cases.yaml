@@ -1,0 +1,155 @@
+version: 1
+dataset: routing_fixtures
+status: candidate
+cases:
+  - id: ROUTE-KW-001
+    agent_id: keyword_analyst
+    purpose: 일반 정보성 키워드 라우팅
+    input: { keyword: 경찰조사 통보 대응 방법, urgency_level: 3, compliance_risk: low }
+    expected: { targets: [content_editor.inbox], requires_approval: [keyword_content_approval] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-KW-002
+    agent_id: keyword_analyst
+    purpose: 고위험 키워드 법무 라우팅
+    input: { keyword: OO동 특정 사건 가해자 변호사, urgency_level: 5, compliance_risk: high }
+    expected: { targets: [compliance_review.queue], blocked_targets: [content_editor.inbox] }
+    basis_refs: [korean_bar_advertising_rules, yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-KW-003
+    agent_id: keyword_analyst
+    purpose: 미성년자 관련 보수적 라우팅
+    input: { keyword: 미성년자 학교폭력 대응, urgency_level: 3, compliance_risk: high }
+    expected: { targets: [compliance_review.queue], blocked_targets: [content_editor.inbox] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-KW-004
+    agent_id: keyword_analyst
+    purpose: 피해자 관점 보수적 라우팅
+    input: { keyword: 성범죄 피해 신고 절차, urgency_level: 4, compliance_risk: high }
+    expected: { targets: [compliance_review.queue], blocked_targets: [content_editor.inbox] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-CE-001
+    agent_id: content_editor
+    purpose: 플래그 없는 콘텐츠 라우팅
+    input: { flagged_claims: [], sensitive_flags: [] }
+    expected: { targets: [publish_queue], requires_approval: [publish_approval] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-CE-002
+    agent_id: content_editor
+    purpose: 결과 보장 플래그 라우팅
+    input: { flagged_claims: [outcome_guarantee], sensitive_flags: [] }
+    expected: { targets: [human_review.queue], requires_approval: [attorney_review] }
+    basis_refs: [lawyers_act_article_23, korean_bar_advertising_rules]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-CE-003
+    agent_id: content_editor
+    purpose: 민감 주제 라우팅
+    input: { flagged_claims: [], sensitive_flags: [minor_related_content] }
+    expected: { targets: [human_review.queue], requires_approval: [attorney_review] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-PA-001
+    agent_id: performance_analyst
+    purpose: 소폭 광고 제안 라우팅
+    input: { action: INCREASE, adjustment_percentage: 15, sensitive_keyword: false }
+    expected: { targets: [auto_apply_queue], external_execution: forbidden }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-PA-002
+    agent_id: performance_analyst
+    purpose: 큰 폭 광고 제안 라우팅
+    input: { action: DECREASE, adjustment_percentage: -35, sensitive_keyword: false }
+    expected: { targets: [human_approval.queue], requires_approval: [marketing_approval] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-PA-003
+    agent_id: performance_analyst
+    purpose: 광고 중지 제안 라우팅
+    input: { action: PAUSE, adjustment_percentage: 0, sensitive_keyword: false }
+    expected: { targets: [human_approval.queue], requires_approval: [marketing_approval] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-PA-004
+    agent_id: performance_analyst
+    purpose: 민감 광고 다중 승인
+    input: { action: INCREASE, adjustment_percentage: 10, sensitive_keyword: true }
+    expected:
+      targets: [auto_apply_queue, compliance_review.queue]
+      requires_approval: [marketing_approval, legal_compliance]
+    basis_refs: [korean_bar_advertising_rules, yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-PA-005
+    agent_id: performance_analyst
+    purpose: Critical 데이터에서 광고 제안 금지
+    input: { tracking_status: Critical }
+    expected: { targets: [dev_team.queue], recommendation_count: 0 }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-DA-001
+    agent_id: data_assistant
+    purpose: 정상 상태 무게시
+    input: { status_summary: Normal, privacy_flags: [] }
+    expected: { state_targets: [data_assistant.tracking_status], message_targets: [] }
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-DA-002
+    agent_id: data_assistant
+    purpose: 경고 상태 게시
+    input: { status_summary: Warning, privacy_flags: [] }
+    expected:
+      state_targets: [data_assistant.tracking_status]
+      message_targets: [data_assistant.tracking_status]
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-DA-003
+    agent_id: data_assistant
+    purpose: Critical 상태 전파
+    input: { status_summary: Critical, privacy_flags: [] }
+    expected:
+      state_targets: [data_assistant.tracking_status]
+      message_targets: [broadcast.all_agents, dev_team.queue]
+    basis_refs: [yeoon_internal_conservative_policy]
+    provenance: synthetic
+    contains_personal_data: false
+
+  - id: ROUTE-DA-004
+    agent_id: data_assistant
+    purpose: 개인정보 신호 개발팀 라우팅
+    input: { status_summary: Warning, privacy_flags: [unmasked_identifier_detected] }
+    expected:
+      state_targets: [data_assistant.tracking_status]
+      message_targets: [data_assistant.tracking_status, dev_team.queue]
+    basis_refs: [privacy_act_pseudonymized_data, privacy_act_enforcement_decree_29_5]
+    provenance: synthetic
+    contains_personal_data: false
