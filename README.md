@@ -25,7 +25,7 @@
 yn_agent/
 ├── README.md                  ← 지금 보고 있는 문서
 ├── ORCHESTRATION.md            ← 4명이 어떻게 맞물리는지 전체 흐름
-├── bot/                        ← 승인 엔진·Phase 2 실행 안전 경계·4명 실행 로직
+├── bot/                        ← 승인 엔진·실행 안전 경계·Slack 테스트 어댑터·4명 실행 로직
 ├── _shared/                    ← 4명 공통 참조 자료
 │   ├── knowledge/
 │   │   ├── compliance_rules.md
@@ -38,6 +38,8 @@ yn_agent/
 ├── docs/phase1/                ← 역할별 승인 워크플로 계약
 ├── docs/phase2/                ← 실행 안전장치·dry-run 계약
 ├── docs/phase2_5/              ← ChatGPT 로그인 기반 Codex CLI 모델 공급자
+├── docs/phase3/                ← Slack Socket Mode 테스트 UI 운영 계약
+├── slack/                      ← Slack App manifest와 비밀값 없는 매핑 예제
 ├── evals/                      ← 코드 fixture, 법률 Golden Set 후보, 경계 사례와 평가 기준
 ├── scripts/validate_phase0.py  ← 자동 검증 및 다음 Phase 진입 Gate
 └── {agent_name}/               # 직원별 폴더 (동일 구조 반복)
@@ -71,13 +73,14 @@ yn_agent/
 - [x] Phase 1 역할별 승인 엔진 — 이력형 결정, 버전, TTL, idempotent handoff
 - [x] Phase 2 실행 안전장치 — default deny, kill switch, allowlist, 한도, 멱등성, dry-run
 - [x] Phase 2.5 모델 전환 — Gemini 제거, 로그인 기반 Codex CLI 구조화 출력
-- [x] 기존 채팅 플랫폼 런타임 제거; Phase 3 Slack UI 연결 대기
+- [x] Phase 3 Slack 테스트 구현 — Socket Mode, `/hermes-test`, 버튼·모달, 테스트 세션
+- [ ] Phase 3 개발 워크스페이스 연결 및 Live Gate
 - [x] Phase 0 Engineering Gate — 구현 기준선·평가 후보·근거 PDF 무결성 검증
 - [ ] Release Human Gate — Slack 검토 화면 이후 제품·법률·개인정보·보안 담당 승인
 - [ ] 직원별 tools.md, evals/test_cases.md
 - [ ] 실데이터 API 연동 (현재 `USE_FAKE_DATA=true`)
 - [ ] 승인 후 실제 실행(CMS 발행 / Ads 반영)
-- [ ] Phase 3 Slack 사용자/채널과 `_shared/roles.md`, `_shared/queues.md` 매핑
+- [ ] Phase 4 Slack 파일럿 — 실제 work item 표시와 승인 엔진 연결
 
 ## 변경 관리
 
@@ -142,3 +145,22 @@ python -m unittest discover -v
 `--gate`는 실제 구조화 출력 1회를 실행하므로 소량의 구독 사용량을 소비한다. 세부
 운영 계약은 [docs/phase2_5/codex_cli_provider.md](./docs/phase2_5/codex_cli_provider.md)를
 참고하세요.
+
+## Phase 3 검증
+
+Phase 3는 별도 개발 워크스페이스의 Socket Mode에서 고정 합성 fixture와 테스트 전용
+SQLite 세션만 사용합니다. Slack 버튼은 실제 승인, handoff, Codex 또는 외부 실행을
+발생시키지 않습니다.
+
+```bash
+python scripts/validate_phase3.py --gate
+python -m unittest discover -v
+
+# ~/.hermes/.env와 ~/.hermes/slack_mapping.yaml 구성 후 실행
+python scripts/validate_phase3.py --live-gate
+python -m bot.slack_app
+```
+
+Slack에서 `/hermes-test status`를 실행한 뒤 `keyword`, `content`, `performance`, `data`
+테스트 카드를 확인합니다. 설정 및 직접 테스트 절차는
+[docs/phase3/slack_test_foundation.md](./docs/phase3/slack_test_foundation.md)를 참고하세요.

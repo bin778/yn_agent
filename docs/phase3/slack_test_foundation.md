@@ -1,0 +1,81 @@
+# Phase 3 Slack 테스트 기반 운영 계약
+
+## 경계
+
+Phase 3 Slack은 고정된 합성 fixture를 보여주는 UI 테스트 계층이다. Slack에서 누른
+버튼과 제출한 모달은 `slack_test_sessions`, `slack_interaction_events`에만 기록한다.
+`approval_requests`, `approval_decisions`, `acknowledgements`, `handoff_jobs`,
+`execution_requests`를 생성하거나 변경하지 않으며 Codex CLI도 호출하지 않는다.
+
+모든 메시지는 `PHASE 3 TEST — 실제 승인 아님`으로 표시한다. SQLite 테스트 세션이
+상태 원본이며 Slack 메시지는 현재 상태를 표시하는 인터페이스다.
+
+## Slack App 준비
+
+1. 별도 Slack 개발 워크스페이스를 만든다.
+2. Slack App 관리 화면에서 `slack/manifest.yaml`을 사용해 `Hermes Dev`를 만든다.
+3. 워크스페이스에 App을 설치하고 `xoxb-` Bot User OAuth Token을 발급받는다.
+4. Basic Information에서 `connections:write` scope의 `xapp-` App-Level Token을 만든다.
+5. 비공개 `#hermes-dev` 채널을 만들고 Hermes Bot을 초대한다.
+6. `slack/mapping.example.yaml`을 `~/.hermes/slack_mapping.yaml`로 복사하고 실제
+   Workspace, User, Channel ID로 바꾼다. Phase 3의 다섯 queue는 같은 채널이어도 된다.
+7. `~/.hermes/.env`에 아래 값을 추가한다.
+
+```ini
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_MAPPING_PATH=~/.hermes/slack_mapping.yaml
+SLACK_TEST_SESSION_TTL_MINUTES=15
+```
+
+토큰과 실제 매핑 파일은 저장소, DB, 로그에 복사하지 않는다. Bot scope는
+`commands`, `chat:write`만 사용하며 Events API 구독과 공개 HTTP endpoint는 만들지 않는다.
+
+## 로컬 실행과 직접 테스트
+
+```bash
+python -m pip install -r bot/requirements.txt
+python scripts/validate_phase0.py --gate
+python scripts/validate_phase1.py --gate
+python scripts/validate_phase2.py --gate
+python scripts/validate_codex_provider.py --gate
+python scripts/validate_phase3.py --gate
+python -m unittest discover -v
+
+# 아래 두 명령은 Slack 설정 후 실행한다.
+python scripts/validate_phase3.py --live-gate
+python -m bot.slack_app
+```
+
+`--live-gate`는 `auth.test`로 Workspace를 확인하고 `#hermes-dev`에 삭제하지 않는
+테스트 카드 한 건을 게시한다. 그 후 Socket Mode 프로세스를 실행한 상태에서 Slack에서
+다음을 순서대로 입력한다.
+
+```text
+/hermes-test status
+/hermes-test keyword
+/hermes-test content
+/hermes-test performance
+/hermes-test data
+```
+
+- `keyword`는 단일 역할 fixture라 한 명의 테스트 승인으로 완료할 수 있다.
+- 나머지 복수 역할 fixture는 첫 역할 처리 뒤 `pending`을 유지한다.
+- 동일 Slack 사용자가 두 번째 역할까지 충족할 수 없는 것이 정상이다.
+- 반려·수정 요청은 사유가 없는 경우 모달을 제출할 수 없어야 한다.
+- 15분이 지난 버튼과 종료된 카드의 버튼은 stale 응답이어야 한다.
+
+## 장애 처리
+
+- `xoxb-`/`xapp-` 누락 또는 Workspace 불일치: 프로세스는 시작하지 않는다.
+- 사용자·채널·역할·queue 매핑 오류: 해당 명령이나 액션을 거부한다.
+- Slack 재전송: 안정적인 payload 필드로 만든 idempotency key를 재사용해 한 번만 기록한다.
+- Slack 연결 장애: Phase 1 승인 및 외부 실행 상태는 변하지 않는다. 연결 복구 후 테스트를
+  다시 실행한다.
+- 로그에는 토큰, 전체 Slack payload, 모달 사유 원문을 기록하지 않는다.
+
+## Phase 4 인계
+
+Phase 4에서는 현재 identity provider, Block Kit renderer, idempotency, message binding을
+유지하고 테스트 세션 서비스 대신 실제 work item 조회와 승인 서비스를 연결한다. Phase 3
+테이블은 운영 감사 기록으로 승격하지 않는다.

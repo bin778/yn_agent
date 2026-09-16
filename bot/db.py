@@ -185,6 +185,40 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             work_item_version INTEGER NOT NULL,
             output_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS slack_test_sessions (
+            session_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL UNIQUE,
+            fixture_id TEXT NOT NULL,
+            fixture_type TEXT NOT NULL CHECK (fixture_type IN (
+                'keyword', 'content', 'performance', 'data'
+            )),
+            team_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            message_ts TEXT,
+            created_by TEXT NOT NULL,
+            required_roles_json TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN (
+                'pending', 'approved', 'rejected', 'revision_requested',
+                'acknowledged', 'expired'
+            )),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS slack_interaction_events (
+            interaction_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            action_type TEXT NOT NULL CHECK (action_type IN (
+                'approved', 'rejected', 'revision_requested',
+                'acknowledged', 'expired'
+            )),
+            team_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            acting_role TEXT,
+            reason TEXT,
+            occurred_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES slack_test_sessions(session_id)
+        );
         CREATE TRIGGER IF NOT EXISTS approval_decisions_no_update
         BEFORE UPDATE ON approval_decisions BEGIN
             SELECT RAISE(ABORT, 'approval decisions are append-only');
@@ -208,6 +242,14 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
         CREATE TRIGGER IF NOT EXISTS execution_attempts_no_delete
         BEFORE DELETE ON execution_attempts BEGIN
             SELECT RAISE(ABORT, 'execution attempts are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS slack_interaction_events_no_update
+        BEFORE UPDATE ON slack_interaction_events BEGIN
+            SELECT RAISE(ABORT, 'Slack interaction events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS slack_interaction_events_no_delete
+        BEFORE DELETE ON slack_interaction_events BEGIN
+            SELECT RAISE(ABORT, 'Slack interaction events are append-only');
         END;
         """
     )

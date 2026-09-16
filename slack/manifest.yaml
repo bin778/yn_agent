@@ -1,0 +1,23 @@
+display_information:
+  name: Hermes Dev
+  description: Hermes Phase 3 Slack test UI
+  background_color: "#1F2937"
+features:
+  bot_user:
+    display_name: Hermes Dev
+    always_online: false
+  slash_commands:
+    - command: /hermes-test
+      description: Hermes Phase 3 테스트 카드와 연결 상태를 확인합니다
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - commands
+      - chat:write
+settings:
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

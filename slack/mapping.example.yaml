@@ -1,0 +1,23 @@
+# 실제 Slack ID를 채운 뒤 ~/.hermes/slack_mapping.yaml로 복사합니다.
+# 토큰은 이 파일에 넣지 않습니다.
+workspace_id: T00000000
+
+allowed_users:
+  U00000000:
+    roles:
+      - keyword_approver
+      - content_approver
+      - performance_approver
+      - data_owner
+      - legal_compliance
+      - operations_owner
+      - privacy_officer
+      - workflow_admin
+
+# Phase 3에서는 모든 큐를 같은 비공개 #hermes-dev 채널에 연결할 수 있습니다.
+queue_channels:
+  compliance_review.queue: C00000000
+  human_review.queue: C00000000
+  performance_review.queue: C00000000
+  data_assistant.tracking_status: C00000000
+  dev_team.queue: C00000000
