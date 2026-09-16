@@ -4,7 +4,7 @@ routine.yaml의 task: draft_content / steps 를 코드로 옮긴 것.
 
 steps 매핑:
   fetch_keyword → 승인 후 생성된 draft_content handoff 조회
-  draft         → call_gemini_structured()
+  draft         → call_structured()
   self_flag     → LLM이 flagged_claims / sensitive_flags 채움
   classify      → flagged 또는 sensitive → human_review.queue
                   else                 → publish_queue
@@ -13,11 +13,10 @@ steps 매핑:
 import json
 
 from ..loaders import build_system_prompt
-from ..llm_client import call_gemini_structured
+from ..llm_client import call_structured, get_model_identity
 from ..schemas import ContentEditorOutput, KeywordItem
 from ..db import recent_rejections
 from ..workflow import claim_handoffs, complete_handoff, create_work_item
-from ..config import GEMINI_MODEL
 
 AGENT_ID = "content_editor"
 
@@ -68,7 +67,7 @@ SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초�
 {json.dumps(payload, ensure_ascii=False, indent=2)}
 """
 
-    result: ContentEditorOutput = call_gemini_structured(
+    result: ContentEditorOutput = call_structured(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         schema_model=ContentEditorOutput,
@@ -84,7 +83,7 @@ SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초�
         agent_id=AGENT_ID,
         output=result.model_dump(),
         routed_to=target,
-        model_version=GEMINI_MODEL,
+        model_version=get_model_identity(),
         input_summary=result.target_keyword,
         correlation_id=correlation_id,
         db_path=db_path,

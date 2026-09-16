@@ -4,7 +4,7 @@ routine.yaml의 task: run_daily_keyword_scan / steps 를 그대로 코드로 옮
 
 steps 매핑:
   fetch_data → get_fake_search_data() (또는 실제 API, config.USE_FAKE_DATA로 전환)
-  analyze    → call_gemini_structured()
+  analyze    → call_structured()
   classify   → compliance_risk == "high" → compliance_review.queue
                else                       → content_editor.inbox
   record     → workflow.create_work_item() + 역할별 승인 요청
@@ -13,11 +13,10 @@ import json
 
 from ..loaders import build_system_prompt
 from ..fake_data import get_fake_search_data
-from ..llm_client import call_gemini_structured
+from ..llm_client import call_structured, get_model_identity
 from ..schemas import KeywordAnalystOutput
 from ..db import recent_history
 from ..workflow import create_work_item
-from ..config import GEMINI_MODEL
 
 AGENT_ID = "keyword_analyst"
 
@@ -51,7 +50,7 @@ def run_daily_keyword_scan() -> list[dict]:
 {json.dumps(data, ensure_ascii=False, indent=2)}
 """
 
-    result: KeywordAnalystOutput = call_gemini_structured(
+    result: KeywordAnalystOutput = call_structured(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         schema_model=KeywordAnalystOutput,
@@ -66,7 +65,7 @@ def run_daily_keyword_scan() -> list[dict]:
             agent_id=AGENT_ID,
             output=item.model_dump(),
             routed_to=target,
-            model_version=GEMINI_MODEL,
+            model_version=get_model_identity(),
             input_summary=item.keyword,
         )
         routed_results.append({"item": item, "target": target, **workflow_ref})

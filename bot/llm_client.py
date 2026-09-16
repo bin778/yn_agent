@@ -1,58 +1,299 @@
-"""
-Gemini API 호출 래퍼 (2026년 기준 google-genai SDK 사용).
-Pydantic 모델을 response_schema로 그대로 넘기면 SDK가 자동으로 파싱해준다.
-스키마 검증 실패 시 config.md의 retry_on_schema_fail(2회) 규칙대로 재시도한다.
-"""
-from google import genai
-from google.genai import types
+"""Structured LLM calls through a locally authenticated Codex CLI."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+from pathlib import Path
+from typing import Callable
+
 from pydantic import BaseModel, ValidationError
 
-from .config import GOOGLE_API_KEY, GEMINI_MODEL
-
-class SchemaParseError(Exception):
-    pass
-
-
-def _get_client() -> genai.Client:
-    """Create the network client only when an agent run actually needs it."""
-    if not GOOGLE_API_KEY:
-        raise RuntimeError("필수 환경변수가 없습니다: GOOGLE_API_KEY")
-    return genai.Client(api_key=GOOGLE_API_KEY)
+from .config import (
+    CODEX_COMMAND,
+    CODEX_MAX_CONCURRENCY,
+    CODEX_TIMEOUT_SECONDS,
+    LLM_PROVIDER,
+    check_required_env,
+)
 
 
-def call_gemini_structured(
+class CodexUnavailableError(RuntimeError):
+    """The configured Codex executable is missing or incompatible."""
+
+
+class CodexAuthError(RuntimeError):
+    """Codex is not authenticated with a ChatGPT subscription login."""
+
+
+class CodexTimeoutError(RuntimeError):
+    """A Codex subprocess exceeded the configured deadline."""
+
+
+class CodexExecutionError(RuntimeError):
+    """Codex exited before returning a valid structured response."""
+
+
+class SchemaParseError(RuntimeError):
+    """Codex output did not validate against the requested Pydantic schema."""
+
+
+Runner = Callable[..., subprocess.CompletedProcess[str]]
+Which = Callable[[str], str | None]
+
+_REQUIRED_EXEC_OPTIONS = (
+    "--ephemeral",
+    "--sandbox",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--skip-git-repo-check",
+    "--color",
+    "--output-schema",
+)
+_SAFE_CODEX_ENV_KEYS = (
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "CODEX_HOME",
+    "CODEX_CA_CERTIFICATE",
+    "SSL_CERT_FILE",
+)
+
+
+def _codex_environment() -> dict[str, str]:
+    """Expose only what the CLI needs; never inherit app or API credentials."""
+    env = {
+        key: os.environ[key]
+        for key in _SAFE_CODEX_ENV_KEYS
+        if key in os.environ
+    }
+    env["LANG"] = "C"
+    env["LC_ALL"] = "C"
+    env["RUST_LOG"] = "error"
+    return env
+
+
+def _strict_object_schema(value: object) -> None:
+    """Forbid undeclared object keys throughout a generated JSON Schema."""
+    if isinstance(value, dict):
+        if value.get("type") == "object" or "properties" in value:
+            value.setdefault("additionalProperties", False)
+        for child in value.values():
+            _strict_object_schema(child)
+    elif isinstance(value, list):
+        for child in value:
+            _strict_object_schema(child)
+
+
+class CodexCLIClient:
+    """Synchronous, injectable adapter around ``codex exec``."""
+
+    def __init__(
+        self,
+        *,
+        command: str = CODEX_COMMAND,
+        timeout_seconds: int = CODEX_TIMEOUT_SECONDS,
+        max_concurrency: int = CODEX_MAX_CONCURRENCY,
+        runner: Runner = subprocess.run,
+        which: Which = shutil.which,
+    ) -> None:
+        if not command:
+            raise ValueError("Codex command must not be empty")
+        if timeout_seconds <= 0 or max_concurrency <= 0:
+            raise ValueError("Codex timeout and concurrency must be positive")
+        self.command = command
+        self.timeout_seconds = timeout_seconds
+        self._runner = runner
+        self._which = which
+        self._slots = threading.BoundedSemaphore(max_concurrency)
+        self._runtime_lock = threading.Lock()
+        self._resolved_command: str | None = None
+        self._model_identity: str | None = None
+
+    def _run_control(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return self._runner(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=min(self.timeout_seconds, 30),
+                check=False,
+                shell=False,
+                env=_codex_environment(),
+            )
+        except FileNotFoundError as exc:
+            raise CodexUnavailableError("Codex CLI executable was not found") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CodexUnavailableError("Codex CLI preflight timed out") from exc
+        except OSError as exc:
+            raise CodexUnavailableError("Codex CLI preflight could not start") from exc
+
+    def check_runtime(self, *, refresh: bool = False) -> None:
+        """Fail closed unless a compatible CLI is logged in through ChatGPT."""
+        check_required_env()
+        if LLM_PROVIDER != "codex_cli":
+            raise CodexUnavailableError("Only the codex_cli provider is supported")
+
+        with self._runtime_lock:
+            if self._model_identity is not None and not refresh:
+                return
+            # A failed refresh must not leave an older successful preflight cached.
+            self._resolved_command = None
+            self._model_identity = None
+
+            resolved = self._which(self.command)
+            if not resolved:
+                raise CodexUnavailableError("Codex CLI executable was not found")
+
+            status = self._run_control([resolved, "login", "status"])
+            if status.returncode != 0:
+                raise CodexAuthError("Codex CLI login status check failed")
+            auth_text = f"{status.stdout}\n{status.stderr}".lower()
+            if "logged in using chatgpt" not in auth_text:
+                raise CodexAuthError(
+                    "Codex CLI must be logged in with ChatGPT subscription credentials"
+                )
+
+            help_result = self._run_control([resolved, "exec", "--help"])
+            if help_result.returncode != 0:
+                raise CodexUnavailableError("Codex CLI exec help check failed")
+            help_text = f"{help_result.stdout}\n{help_result.stderr}"
+            missing = [option for option in _REQUIRED_EXEC_OPTIONS if option not in help_text]
+            if missing:
+                raise CodexUnavailableError(
+                    "Codex CLI lacks required structured execution options"
+                )
+
+            version_result = self._run_control([resolved, "--version"])
+            if version_result.returncode != 0:
+                raise CodexUnavailableError("Codex CLI version check failed")
+            version_text = version_result.stdout.strip()
+            version = version_text.split()[-1] if version_text else "unknown"
+            self._resolved_command = resolved
+            self._model_identity = f"codex-cli/{version}:default"
+
+    def get_model_identity(self) -> str:
+        self.check_runtime()
+        assert self._model_identity is not None
+        return self._model_identity
+
+    @staticmethod
+    def _prompt(system_prompt: str, user_prompt: str) -> str:
+        return (
+            "You are a constrained structured-output worker. "
+            "Do not use tools, inspect files, or perform external actions. "
+            "Return only JSON that conforms to the supplied output schema.\n\n"
+            "<system_instructions>\n"
+            f"{system_prompt}\n"
+            "</system_instructions>\n\n"
+            "<user_task>\n"
+            f"{user_prompt}\n"
+            "</user_task>\n"
+        )
+
+    def _invoke(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema_model: type[BaseModel],
+    ) -> BaseModel:
+        self.check_runtime()
+        assert self._resolved_command is not None
+
+        schema = schema_model.model_json_schema()
+        _strict_object_schema(schema)
+
+        with tempfile.TemporaryDirectory(prefix="hermes-codex-") as temp_dir:
+            schema_path = Path(temp_dir) / "output-schema.json"
+            schema_path.write_text(
+                json.dumps(schema, ensure_ascii=False), encoding="utf-8"
+            )
+            args = [
+                self._resolved_command,
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "--output-schema",
+                str(schema_path),
+                "-",
+            ]
+            try:
+                completed = self._runner(
+                    args,
+                    input=self._prompt(system_prompt, user_prompt),
+                    capture_output=True,
+                    text=True,
+                    cwd=temp_dir,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    shell=False,
+                    env=_codex_environment(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise CodexTimeoutError("Codex structured generation timed out") from exc
+            except FileNotFoundError as exc:
+                raise CodexUnavailableError("Codex CLI executable was not found") from exc
+            except OSError as exc:
+                raise CodexExecutionError("Codex structured generation could not start") from exc
+
+            if completed.returncode != 0:
+                # stderr may contain prompt fragments or provider diagnostics.
+                raise CodexExecutionError(
+                    f"Codex structured generation failed with exit code {completed.returncode}"
+                )
+            return schema_model.model_validate_json(completed.stdout)
+
+    def call_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema_model: type[BaseModel],
+        max_retries: int = 2,
+    ) -> BaseModel:
+        if max_retries < 0:
+            raise ValueError("max_retries must be zero or greater")
+        last_error: ValidationError | ValueError | None = None
+        with self._slots:
+            for _attempt in range(max_retries + 1):
+                try:
+                    return self._invoke(system_prompt, user_prompt, schema_model)
+                except (ValidationError, ValueError) as exc:
+                    last_error = exc
+        raise SchemaParseError(
+            f"Codex output failed schema validation after {max_retries + 1} attempts"
+        ) from last_error
+
+
+_DEFAULT_CLIENT = CodexCLIClient()
+
+
+def call_structured(
     system_prompt: str,
     user_prompt: str,
     schema_model: type[BaseModel],
     max_retries: int = 2,
 ) -> BaseModel:
-    """
-    system_prompt: SOUL.md 등을 합쳐 만든 이 직원의 시스템 프롬프트
-    user_prompt: 이번 작업(오늘의 데이터 등)
-    schema_model: 응답을 검증할 Pydantic 모델 (예: KeywordAnalystOutput)
-    """
-    client = _get_client()
-    last_error = None
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    response_schema=schema_model,
-                    temperature=0.2,  # 일관된 판정이 중요한 도메인이라 낮게 설정
-                ),
-            )
-            # SDK가 response_schema로 pydantic 모델을 넘기면 .parsed 로 바로 인스턴스를 준다.
-            if response.parsed is not None:
-                return response.parsed
-            # 혹시 .parsed가 비어있으면 텍스트에서 직접 검증
-            return schema_model.model_validate_json(response.text)
+    return _DEFAULT_CLIENT.call_structured(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        schema_model=schema_model,
+        max_retries=max_retries,
+    )
 
-        except (ValidationError, ValueError) as e:
-            last_error = e
-            print(f"[LLM][재시도 {attempt + 1}/{max_retries}] 스키마 검증 실패: {e}")
 
-    raise SchemaParseError(f"스키마 검증 {max_retries}회 재시도 후에도 실패: {last_error}")
+def get_model_identity() -> str:
+    return _DEFAULT_CLIENT.get_model_identity()
+
+
+def check_codex_runtime() -> None:
+    _DEFAULT_CLIENT.check_runtime(refresh=True)

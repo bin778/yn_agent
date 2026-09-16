@@ -37,6 +37,7 @@ yn_agent/
 ├── docs/phase0/                ← 플랫폼 전환 전 워크플로·외부 실행 계약
 ├── docs/phase1/                ← 역할별 승인 워크플로 계약
 ├── docs/phase2/                ← 실행 안전장치·dry-run 계약
+├── docs/phase2_5/              ← ChatGPT 로그인 기반 Codex CLI 모델 공급자
 ├── evals/                      ← 코드 fixture, 법률 Golden Set 후보, 경계 사례와 평가 기준
 ├── scripts/validate_phase0.py  ← 자동 검증 및 다음 Phase 진입 Gate
 └── {agent_name}/               # 직원별 폴더 (동일 구조 반복)
@@ -69,6 +70,7 @@ yn_agent/
 - [x] \_shared/queues.md, \_shared/roles.md
 - [x] Phase 1 역할별 승인 엔진 — 이력형 결정, 버전, TTL, idempotent handoff
 - [x] Phase 2 실행 안전장치 — default deny, kill switch, allowlist, 한도, 멱등성, dry-run
+- [x] Phase 2.5 모델 전환 — Gemini 제거, 로그인 기반 Codex CLI 구조화 출력
 - [x] 기존 채팅 플랫폼 런타임 제거; Phase 3 Slack UI 연결 대기
 - [x] Phase 0 Engineering Gate — 구현 기준선·평가 후보·근거 PDF 무결성 검증
 - [ ] Release Human Gate — Slack 검토 화면 이후 제품·법률·개인정보·보안 담당 승인
@@ -124,3 +126,19 @@ python -m unittest discover -v
 ```
 
 세부 계약은 [docs/phase2/execution_safety.md](./docs/phase2/execution_safety.md)를 참고하세요.
+
+## Phase 2.5 검증
+
+현재 macOS 사용자의 ChatGPT 로그인으로 Codex CLI를 호출한다. API 키나 OAuth 토큰은
+프로젝트 환경 파일에 저장하지 않는다.
+
+```bash
+codex login status
+python scripts/validate_codex_provider.py
+python scripts/validate_codex_provider.py --gate
+python -m unittest discover -v
+```
+
+`--gate`는 실제 구조화 출력 1회를 실행하므로 소량의 구독 사용량을 소비한다. 세부
+운영 계약은 [docs/phase2_5/codex_cli_provider.md](./docs/phase2_5/codex_cli_provider.md)를
+참고하세요.

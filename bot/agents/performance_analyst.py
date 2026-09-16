@@ -7,7 +7,7 @@ steps 매핑:
       Critical → halt (제안 생성 안 함)
       Warning  → caution_flag=True 로 진행
   fetch_data → get_fake_ads_data()
-  analyze    → call_gemini_structured()
+  analyze    → call_structured()
   classify   → 모든 제안은 퍼포먼스 승인 대기
                |adj|>20 or PAUSE → operations_owner 추가
                sensitive → legal_compliance 추가
@@ -17,11 +17,11 @@ import json
 
 from ..loaders import build_system_prompt
 from ..fake_data import get_fake_ads_data
-from ..llm_client import call_gemini_structured
+from ..llm_client import call_structured, get_model_identity
 from ..schemas import PerformanceAnalystOutput, BidRecommendation
 from ..db import recent_history, get_tracking_status
 from ..workflow import create_work_item
-from ..config import GEMINI_MODEL, USE_FAKE_DATA
+from ..config import USE_FAKE_DATA
 
 AGENT_ID = "performance_analyst"
 
@@ -88,7 +88,7 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
             agent_id=AGENT_ID,
             output={"halted": True, "reason": halt_payload["halt_reason"], "tracking_status": status},
             routed_to="dev_team.queue",
-            model_version=GEMINI_MODEL,
+            model_version="policy-engine/no-llm",
             input_summary="halt:tracking_critical",
         )
         halt_payload.update(workflow_ref)
@@ -118,7 +118,7 @@ status={status}, caution={caution}
 {json.dumps(ads_data, ensure_ascii=False, indent=2)}
 """
 
-    result: PerformanceAnalystOutput = call_gemini_structured(
+    result: PerformanceAnalystOutput = call_structured(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         schema_model=PerformanceAnalystOutput,
@@ -137,7 +137,7 @@ status={status}, caution={caution}
             agent_id=AGENT_ID,
             output=item.model_dump(),
             routed_to=",".join(targets),
-            model_version=GEMINI_MODEL,
+            model_version=get_model_identity(),
             input_summary=item.keyword,
         )
         routed_results.append({"item": item, "targets": targets, **workflow_ref})

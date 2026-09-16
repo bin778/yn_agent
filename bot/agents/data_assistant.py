@@ -5,7 +5,7 @@ routine.yaml의 task: run_anomaly_check / steps 를 코드로 옮긴 것.
 steps 매핑:
   fetch_data  → get_fake_tracking_data() (또는 실제 GA4/GTM)
   mask_pii    → _mask_pii() — 원문 제거, privacy_flags 후보 기록
-  analyze     → call_gemini_structured()
+  analyze     → call_structured()
   classify    → Critical → broadcast + dev_team
                 privacy_flags → dev_team
                 항상 tracking_status 갱신
@@ -16,11 +16,11 @@ import json
 
 from ..loaders import build_system_prompt
 from ..fake_data import get_fake_tracking_data
-from ..llm_client import call_gemini_structured
+from ..llm_client import call_structured, get_model_identity
 from ..schemas import DataAssistantOutput
 from ..db import recent_history, upsert_tracking_status
 from ..workflow import create_work_item
-from ..config import GEMINI_MODEL, USE_FAKE_DATA
+from ..config import USE_FAKE_DATA
 
 AGENT_ID = "data_assistant"
 
@@ -119,7 +119,7 @@ SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세�
 {json.dumps(masked, ensure_ascii=False, indent=2)}
 """
 
-    result: DataAssistantOutput = call_gemini_structured(
+    result: DataAssistantOutput = call_structured(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         schema_model=DataAssistantOutput,
@@ -137,7 +137,7 @@ SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세�
         agent_id=AGENT_ID,
         output=result.model_dump(),
         routed_to=routed_to,
-        model_version=GEMINI_MODEL,
+        model_version=get_model_identity(),
         input_summary=f"scenario={scenario}|status={result.status_summary}",
     )
     upsert_tracking_status(
