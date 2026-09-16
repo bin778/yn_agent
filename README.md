@@ -25,7 +25,7 @@
 yn_agent/
 ├── README.md                  ← 지금 보고 있는 문서
 ├── ORCHESTRATION.md            ← 4명이 어떻게 맞물리는지 전체 흐름
-├── bot/                        ← Phase 1 플랫폼 독립 승인 엔진·4명 실행 로직
+├── bot/                        ← 승인 엔진·Phase 2 실행 안전 경계·4명 실행 로직
 ├── _shared/                    ← 4명 공통 참조 자료
 │   ├── knowledge/
 │   │   ├── compliance_rules.md
@@ -35,6 +35,8 @@ yn_agent/
 │   ├── queues.md               # 플랫폼 독립 논리 큐 정의
 │   └── roles.md                # Human `role_key` 정의
 ├── docs/phase0/                ← 플랫폼 전환 전 워크플로·외부 실행 계약
+├── docs/phase1/                ← 역할별 승인 워크플로 계약
+├── docs/phase2/                ← 실행 안전장치·dry-run 계약
 ├── evals/                      ← 코드 fixture, 법률 Golden Set 후보, 경계 사례와 평가 기준
 ├── scripts/validate_phase0.py  ← 자동 검증 및 다음 Phase 진입 Gate
 └── {agent_name}/               # 직원별 폴더 (동일 구조 반복)
@@ -66,6 +68,7 @@ yn_agent/
 - [x] 공통 examples (경계 사례) 완결
 - [x] \_shared/queues.md, \_shared/roles.md
 - [x] Phase 1 역할별 승인 엔진 — 이력형 결정, 버전, TTL, idempotent handoff
+- [x] Phase 2 실행 안전장치 — default deny, kill switch, allowlist, 한도, 멱등성, dry-run
 - [x] 기존 채팅 플랫폼 런타임 제거; Phase 3 Slack UI 연결 대기
 - [x] Phase 0 Engineering Gate — 구현 기준선·평가 후보·근거 PDF 무결성 검증
 - [ ] Release Human Gate — Slack 검토 화면 이후 제품·법률·개인정보·보안 담당 승인
@@ -109,3 +112,15 @@ python scripts/validate_phase0.py --release-gate
 python scripts/validate_phase1.py --gate
 python -m unittest discover -v
 ```
+
+## Phase 2 검증
+
+승인·최신 버전·정책 버전·allowlist·변경 한도·tracking 상태를 확인한 뒤에만
+네트워크 전송 없는 dry-run을 허용합니다. 현재 실제 외부 쓰기 adapter는 없습니다.
+
+```bash
+python scripts/validate_phase2.py --gate
+python -m unittest discover -v
+```
+
+세부 계약은 [docs/phase2/execution_safety.md](./docs/phase2/execution_safety.md)를 참고하세요.

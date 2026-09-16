@@ -136,6 +136,47 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             reason TEXT,
             correlation_id TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS execution_requests (
+            execution_request_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            work_item_version INTEGER NOT NULL,
+            approval_request_id TEXT NOT NULL,
+            execution_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            payload_summary_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            compliance_policy_version TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('disabled', 'read_only', 'dry_run')),
+            status TEXT NOT NULL CHECK (status IN (
+                'requested', 'blocked', 'read_only_succeeded',
+                'dry_run_succeeded', 'failed', 'unknown'
+            )),
+            requested_by TEXT NOT NULL,
+            adapter_name TEXT,
+            blocked_reason TEXT,
+            response_summary_json TEXT,
+            correlation_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY (work_item_id, work_item_version)
+                REFERENCES work_items(work_item_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS execution_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            execution_request_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'blocked', 'read_only_succeeded', 'dry_run_succeeded',
+                'failed', 'unknown'
+            )),
+            reason TEXT,
+            response_summary_json TEXT,
+            correlation_id TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            FOREIGN KEY (execution_request_id)
+                REFERENCES execution_requests(execution_request_id)
+        );
         CREATE TABLE IF NOT EXISTS tracking_status (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             status TEXT NOT NULL,
@@ -159,6 +200,14 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
         CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
         BEFORE DELETE ON audit_events BEGIN
             SELECT RAISE(ABORT, 'audit events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS execution_attempts_no_update
+        BEFORE UPDATE ON execution_attempts BEGIN
+            SELECT RAISE(ABORT, 'execution attempts are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS execution_attempts_no_delete
+        BEFORE DELETE ON execution_attempts BEGIN
+            SELECT RAISE(ABORT, 'execution attempts are append-only');
         END;
         """
     )

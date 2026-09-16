@@ -35,7 +35,7 @@ AI 생성, 사람 승인, 외부 실행은 서로 다른 상태와 감사 이벤
 3. 승인 대상 작업 버전과 실행 대상 버전이 일치한다.
 4. 실행자는 허용된 서비스 계정이며 최소 권한만 가진다.
 5. 대상 시스템, 작업 종류, 금액/변경폭이 allowlist와 한도 안에 있다.
-6. `(work_item_id, execution_type)` idempotency key가 이전에 성공하지 않았다.
+6. `(work_item_id, version, execution_type, target, payload_hash)` 멱등 키가 이전에 처리되지 않았다.
 7. 최신 tracking status와 compliance policy version이 유효하다.
 8. 비상 중지(kill switch)가 활성화되어 있지 않다.
 
@@ -56,6 +56,10 @@ READ_ONLY
 - `LIMITED_PRODUCTION`: allowlist 안에서만 운영 실행
 
 각 단계 승격은 테스트 결과와 사람 승인을 별도 기록한다.
+
+Phase 2는 외부 전송이 없는 fake `READ_ONLY`와 `DRY_RUN`까지만 구현한다. 위 3절의
+production 조건은 실제 외부 호출이 추가되는 이후 단계에 적용하며, Phase 2 dry-run도
+별도의 명시적 활성화와 kill switch 해제가 없으면 동작하지 않는다.
 
 ## 5. 비밀과 네트워크 경계
 
