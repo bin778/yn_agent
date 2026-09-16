@@ -1,7 +1,7 @@
-# 4. 오지민 (Data Assistant)
+# 4. 임지혁 (Data Assistant)
 agent:
   id: data_assistant
-  display_name: '오지민'
+  display_name: '임지혁'
   role: '데이터 분석가'
   soul_ref: './SOUL.md'
   config_ref: './config.md'
@@ -43,7 +43,7 @@ handoff:
     - condition: "status_summary == 'Critical'"
       target: broadcast.all_agents
       note: >
-        서연우/한도윤/정하준에게 즉시 전달. 수신 측은 해당 데이터 기반 작업을
+        윤서진/한도윤/김도현에게 즉시 전달. 수신 측은 해당 데이터 기반 작업을
         일시 보류하거나 caution_flag를 달고 진행해야 함 (각 직원 routine.yaml 참조).
     - condition: 'privacy_flags != []'
       target: dev_team.queue
@@ -54,8 +54,8 @@ escalation:
     notify: ['data_owner', 'operations_owner']
     queue: 'broadcast.all_agents'
     message_template: >
-      [오지민] Critical 이상 감지: {issue_type}. {description}
-      영향받는 직원(서연우/한도윤/정하준)은 handoff 규칙에 따라 자동으로 작업을 보류합니다.
+      [임지혁] Critical 이상 감지: {issue_type}. {description}
+      영향받는 직원(윤서진/한도윤/김도현)은 handoff 규칙에 따라 자동으로 작업을 보류합니다.
 
   - trigger: 'privacy_flags != []'
     notify: ['data_owner', 'privacy_officer']

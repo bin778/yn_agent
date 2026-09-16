@@ -29,7 +29,7 @@ pending
 
 ## 3. 직원별 계약
 
-### 3.1 서연우 — 키워드 분석가
+### 3.1 윤서진 — 키워드 분석가
 
 - 입력: 검색/광고 데이터와 최근 검토 이력
 - 출력: 키워드, 검색 의도, urgency, compliance risk, 판단 사유
@@ -45,7 +45,7 @@ pending
 - flagged/sensitive가 하나라도 있으면 서로 다른 `legal_compliance` 승인을 추가한다.
 - 승인 후 `publish_queue`로 handoff하지만 CMS 발행을 의미하지 않는다.
 
-### 3.3 정하준 — 퍼포먼스 마케터
+### 3.3 김도현 — 퍼포먼스 마케터
 
 - 입력: 신뢰 가능한 집계 광고 데이터와 최신 tracking status
 - tracking status가 `Critical`이면 제안을 생성하지 않는다.
@@ -54,7 +54,7 @@ pending
 - 민감 카테고리는 조정폭과 무관하게 `legal_compliance` 승인이 추가로 필요하다.
 - 필요한 모든 승인이 끝나도 결과는 실행 대기 상태이며 광고 API를 호출하지 않는다.
 
-### 3.4 오지민 — 데이터 분석가
+### 3.4 임지혁 — 데이터 분석가
 
 - 입력: PII가 제거된 집계 데이터
 - `Normal`: 상태만 갱신하고 일반 채널에는 게시하지 않는다.
@@ -65,15 +65,15 @@ pending
 
 ## 4. 승인 유형과 완료 조건
 
-| 작업                  | 승인 유형                                                | 완료 조건                      |
-| --------------------- | -------------------------------------------------------- | ------------------------------ |
-| 일반 키워드 -> 콘텐츠 | `keyword_approver` | 키워드 담당자 1명 |
-| 고위험 키워드 | `keyword_approver` + `legal_compliance` | 서로 다른 2명 |
-| 일반 콘텐츠 | `content_approver` | 콘텐츠 담당자 1명 |
-| flagged/sensitive 콘텐츠 | `content_approver` + `legal_compliance` | 서로 다른 2명 |
-| 일반 퍼포먼스 제안 | `performance_approver` | 퍼포먼스 담당자 1명 |
-| 큰 폭/Pause 광고 | `performance_approver` + `operations_owner` | 서로 다른 2명 |
-| 민감 광고 | 기본 역할 + `legal_compliance` | 요구된 모든 역할 승인 |
+| 작업                     | 승인 유형                                   | 완료 조건             |
+| ------------------------ | ------------------------------------------- | --------------------- |
+| 일반 키워드 -> 콘텐츠    | `keyword_approver`                          | 키워드 담당자 1명     |
+| 고위험 키워드            | `keyword_approver` + `legal_compliance`     | 서로 다른 2명         |
+| 일반 콘텐츠              | `content_approver`                          | 콘텐츠 담당자 1명     |
+| flagged/sensitive 콘텐츠 | `content_approver` + `legal_compliance`     | 서로 다른 2명         |
+| 일반 퍼포먼스 제안       | `performance_approver`                      | 퍼포먼스 담당자 1명   |
+| 큰 폭/Pause 광고         | `performance_approver` + `operations_owner` | 서로 다른 2명         |
+| 민감 광고                | 기본 역할 + `legal_compliance`              | 요구된 모든 역할 승인 |
 
 승인 완료는 외부 실행 허가의 필요조건일 뿐 충분조건이 아니다. 외부 실행 조건은
 [`execution_policy.md`](./execution_policy.md)를 따른다.

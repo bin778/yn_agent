@@ -1,7 +1,7 @@
-# 1. 서연우 (Keyword Analyst)
+# 1. 윤서진 (Keyword Analyst)
 agent:
   id: keyword_analyst
-  display_name: '서연우'
+  display_name: '윤서진'
   role: '키워드 분석가'
   soul_ref: './SOUL.md'
   config_ref: './config.md'
@@ -55,7 +55,7 @@ escalation:
     notify: ['keyword_approver', 'legal_compliance']
     queue: 'compliance_review.queue'
     message_template: >
-      [서연우] 오늘 high-risk 키워드 {count}건 발견. 검토 필요: {queue_link}
+      [윤서진] 오늘 high-risk 키워드 {count}건 발견. 검토 필요: {queue_link}
 
   - trigger: 'schema_parse_fail_count >= 3 (연속)'
     notify: ['operations_owner']
@@ -66,7 +66,7 @@ escalation:
     notify: ['operations_owner']
     queue: 'dev_team.queue'
     message_template: >
-      [서연우] 입력 소스({source}) 24시간 이상 무응답. 오지민 상태값도 함께 확인 요망.
+      [윤서진] 입력 소스({source}) 24시간 이상 무응답. 임지혁 상태값도 함께 확인 요망.
 
 retry_policy:
   schema_validation_fail: 2

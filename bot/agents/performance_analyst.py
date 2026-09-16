@@ -1,5 +1,5 @@
 """
-정하준 (performance_analyst) 작업 실행 로직.
+김도현 (performance_analyst) 작업 실행 로직.
 routine.yaml의 task: run_bid_optimization / steps 를 코드로 옮긴 것.
 
 steps 매핑:
@@ -70,7 +70,7 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
     elif tracking:
         status = tracking["status"]
     else:
-        status = "Normal"  # 아직 오지민 미실행 시 시범용 기본값
+        status = "Normal"  # 아직 임지혁 미실행 시 시범용 기본값
 
     if status == "Critical":
         # routine: halt_task, notify data_assistant/dev_team
@@ -78,7 +78,7 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
             "halted": True,
             "tracking_status": status,
             "halt_reason": (
-                "오지민 tracking_status=Critical — 오염된 데이터로 입찰 조정을 제안하지 않습니다. "
+                "임지혁 tracking_status=Critical — 오염된 데이터로 입찰 조정을 제안하지 않습니다. "
                 "트래킹 복구 후 재실행하세요."
             ),
             "notify_targets": ["dev_team.queue"],
@@ -108,7 +108,7 @@ SOUL.md 원칙에 따라 입찰/예산 조정 제안을 JSON으로 응답하세�
 - 성범죄·미성년자 카테고리는 sensitive_keyword=true 로 표시하세요.
 - 트래킹 상태가 Warning이면 caution_flag=true 로 표시하세요. (현재: {status})
 
-# 트래킹 상태 (오지민)
+# 트래킹 상태 (임지혁)
 status={status}, caution={caution}
 
 # 최근 제안 이력

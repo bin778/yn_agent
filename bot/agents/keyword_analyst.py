@@ -1,5 +1,5 @@
 """
-서연우 (keyword_analyst) 작업 실행 로직.
+윤서진 (keyword_analyst) 작업 실행 로직.
 routine.yaml의 task: run_daily_keyword_scan / steps 를 그대로 코드로 옮긴 것.
 
 steps 매핑:

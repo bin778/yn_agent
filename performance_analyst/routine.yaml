@@ -1,7 +1,7 @@
-# 3. 정하준 (Performance Analyst)
+# 3. 김도현 (Performance Analyst)
 agent:
   id: performance_analyst
-  display_name: '정하준'
+  display_name: '김도현'
   role: '퍼포먼스 마케터'
   soul_ref: './SOUL.md'
   config_ref: './config.md'
@@ -19,7 +19,7 @@ triggers:
     listen_to: 'data_assistant.critical_alert'
     task: pause_recommendations
     description: >
-      오지민이 Critical 이상을 발행하면, 해당 데이터 기반 신규 제안 생성을
+      임지혁이 Critical 이상을 발행하면, 해당 데이터 기반 신규 제안 생성을
       일시 중단하고 기존 performance_execution_pending 항목도 재검토 대상으로 표시한다.
 
 pre_task_context:
@@ -62,7 +62,7 @@ escalation:
     notify: ['performance_approver']
     queue: 'pattern_alert.queue'
     message_template: >
-      [정하준] {campaign} 캠페인 제안이 연속 반려됨. 전략 재검토 필요.
+      [김도현] {campaign} 캠페인 제안이 연속 반려됨. 전략 재검토 필요.
 
   - trigger: 'tracking_status == Critical 상태에서 제안 요청 발생'
     notify: ['operations_owner']

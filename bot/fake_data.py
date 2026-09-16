@@ -5,7 +5,7 @@
 의도적으로 compliance_risk=high로 판정되어야 하는 항목(3번)을 하나 넣어뒀다.
 이건 "안전장치가 실제로 작동하는지" 보여주는 시연 장면 2번용이다.
 
-오지민용 시나리오:
+임지혁용 시나리오:
   critical — submit_form 0건 (Critical + broadcast 시연)
   warning  — 특정 랜딩만 -60% (Warning, 브로드캐스트 없음)
   normal   — 정상
@@ -31,7 +31,7 @@ def get_fake_search_data() -> list[dict]:
 
 
 def get_fake_tracking_data(scenario: str = "critical") -> dict:
-    """오지민용 GA4/GTM 가짜 스냅샷. scenario로 시연 장면을 고른다."""
+    """임지혁용 GA4/GTM 가짜 스냅샷. scenario로 시연 장면을 고른다."""
     scenario = (scenario or "critical").lower().strip()
     if scenario not in TRACKING_SCENARIOS:
         scenario = "critical"
@@ -84,7 +84,7 @@ def get_fake_tracking_data(scenario: str = "critical") -> dict:
 
 def get_fake_ads_data() -> list[dict]:
     """
-    정하준용 Google Ads / Naver 검색광고 가짜 리포트.
+    김도현용 Google Ads / Naver 검색광고 가짜 리포트.
     시연용으로 auto_apply / human_approval / compliance 병행 케이스를 모두 넣는다.
     """
     return [

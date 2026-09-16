@@ -1,5 +1,5 @@
 """
-오지민 (data_assistant) 작업 실행 로직.
+임지혁 (data_assistant) 작업 실행 로직.
 routine.yaml의 task: run_anomaly_check / steps 를 코드로 옮긴 것.
 
 steps 매핑:

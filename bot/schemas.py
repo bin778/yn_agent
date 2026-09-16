@@ -39,7 +39,7 @@ class ContentEditorOutput(BaseModel):
 
 
 class DataAssistantOutput(BaseModel):
-    """오지민(data_assistant) 이상탐지 출력. routine.yaml data_assistant_schema."""
+    """임지혁(data_assistant) 이상탐지 출력. routine.yaml data_assistant_schema."""
 
     status_summary: Literal["Normal", "Warning", "Critical"]
     tracking_anomalies: List[str] = Field(
@@ -62,7 +62,7 @@ class DataAssistantOutput(BaseModel):
 
 
 class BidRecommendation(BaseModel):
-    """정하준 입찰/예산 조정 제안 1건."""
+    """김도현 입찰/예산 조정 제안 1건."""
 
     keyword: str
     campaign: str = Field(default="", description="캠페인명")
@@ -85,6 +85,6 @@ class BidRecommendation(BaseModel):
 
 
 class PerformanceAnalystOutput(BaseModel):
-    """정하준(performance_analyst) 출력. routine.yaml performance_analyst_schema."""
+    """김도현(performance_analyst) 출력. routine.yaml performance_analyst_schema."""
 
     recommendations: List[BidRecommendation]

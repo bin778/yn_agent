@@ -3,16 +3,16 @@
 > 승인 엔진은 채팅 플랫폼의 역할명이 아닌 `role_key`를 사용한다.
 > Slack 멤버/사용자 그룹 매핑은 Phase 3에서 추가한다. 매핑을 확인할 수 없으면 승인을 거부한다.
 
-| `role_key` | 책임 | 관련 AI 직원/업무 |
-| --- | --- | --- |
-| `keyword_approver` | 키워드 후보의 사업적 타당성과 의도 확인 | 서연우/키워드 |
-| `content_approver` | 콘텐츠 품질·톤·브랜드 적합성 확인 | 한도윤/콘텐츠 |
-| `performance_approver` | 입찰·예산 제안의 성과 근거 확인 | 정하준/퍼포먼스 |
-| `data_owner` | Warning/Critical 데이터 알림 확인 | 오지민/데이터 |
-| `legal_compliance` | 법률·변협 규정·민감 광고 검토 | 고위험 키워드/콘텐츠/광고 |
-| `operations_owner` | 큰 조정폭·PAUSE·운영 변경 통제 | 퍼포먼스/운영 |
-| `privacy_officer` | 개인정보 신호 확인과 후속 조치 | 데이터/개인정보 |
-| `workflow_admin` | 중복·오류 승인 요청 취소 | 운영 관리 |
+| `role_key`             | 책임                                    | 관련 AI 직원/업무         |
+| ---------------------- | --------------------------------------- | ------------------------- |
+| `keyword_approver`     | 키워드 후보의 사업적 타당성과 의도 확인 | 윤서진/키워드             |
+| `content_approver`     | 콘텐츠 품질·톤·브랜드 적합성 확인       | 한도윤/콘텐츠             |
+| `performance_approver` | 입찰·예산 제안의 성과 근거 확인         | 김도현/퍼포먼스           |
+| `data_owner`           | Warning/Critical 데이터 알림 확인       | 임지혁/데이터             |
+| `legal_compliance`     | 법률·변협 규정·민감 광고 검토           | 고위험 키워드/콘텐츠/광고 |
+| `operations_owner`     | 큰 조정폭·PAUSE·운영 변경 통제          | 퍼포먼스/운영             |
+| `privacy_officer`      | 개인정보 신호 확인과 후속 조치          | 데이터/개인정보           |
+| `workflow_admin`       | 중복·오류 승인 요청 취소                | 운영 관리                 |
 
 ## 권한 규칙
 

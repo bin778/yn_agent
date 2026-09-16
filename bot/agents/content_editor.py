@@ -57,7 +57,7 @@ def _draft_content(
     system_prompt = build_system_prompt(AGENT_ID)
     rejections_text = _format_rejections()
 
-    user_prompt = f"""아래는 서연우가 승인한 키워드 후보입니다.
+    user_prompt = f"""아래는 윤서진이 승인한 키워드 후보입니다.
 SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초안을 작성하고,
 자기점검 결과(flagged_claims, sensitive_flags)를 빠짐없이 JSON으로 응답하세요.
 

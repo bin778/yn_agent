@@ -12,7 +12,7 @@ triggers:
     listen_to: 'keyword_analyst.content_editor.inbox'
     task: draft_content
     description: >
-      서연우가 승인된 키워드를 넘기면 즉시 초안 작성을 시작한다.
+      윤서진이 승인된 키워드를 넘기면 즉시 초안 작성을 시작한다.
       스케줄이 아니라 큐 적재 기반 event-driven.
 
   - type: schedule

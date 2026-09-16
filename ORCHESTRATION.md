@@ -5,13 +5,13 @@ Hermes는 AI 직원의 산출물, Human 승인, handoff, 외부 실행을 분리
 
 ```mermaid
 flowchart TD
-    KA[서연우: 키워드 분석] --> KAPP[키워드 담당자 승인]
+    KA[윤서진: 키워드 분석] --> KAPP[키워드 담당자 승인]
     KAPP -->|approved handoff| CE[한도윤: 콘텐츠 작성]
     CE --> CAPP[콘텐츠 담당자 승인]
     CAPP -->|approved handoff| PQ[publish_queue]
-    PA[정하준: 입찰/예산 제안] --> PAPP[퍼포먼스 담당자 승인]
+    PA[김도현: 입찰/예산 제안] --> PAPP[퍼포먼스 담당자 승인]
     PAPP --> EP[performance_execution_pending]
-    DA[오지민: 데이터 감시] --> STATUS[data_assistant.tracking_status]
+    DA[임지혁: 데이터 감시] --> STATUS[data_assistant.tracking_status]
     STATUS -. Critical .-> PA
     LEGAL[법무 담당자] -. 고위험 추가 승인 .-> KAPP
     LEGAL -. flagged/sensitive 추가 승인 .-> CAPP
