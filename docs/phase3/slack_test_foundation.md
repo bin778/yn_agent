@@ -79,3 +79,24 @@ python -m bot.slack_app
 Phase 4에서는 현재 identity provider, Block Kit renderer, idempotency, message binding을
 유지하고 테스트 세션 서비스 대신 실제 work item 조회와 승인 서비스를 연결한다. Phase 3
 테이블은 운영 감사 기록으로 승격하지 않는다.
+
+### Phase 4 개발 검증
+
+일반 합성 키워드 한 건을 Phase 1 승인 엔진에 연결하는 개발 명령을 별도로 켤 수
+있습니다. 개발 워크스페이스의 기존 앱과 `/hermes-test` 등록을 사용합니다.
+이미 실행 중인 Socket Mode 프로세스를 종료한 뒤 다음과 같이 재시작합니다.
+
+```bash
+HERMES_DB_PATH="$HOME/.hermes/hermes-dev.db" \
+  python -m bot.slack_app --approval-demo-db "$HOME/.hermes/hermes-approval-demo.db"
+```
+
+1. 매핑의 개발 채널에서 `keyword_approver` 역할로 `/hermes-test approval-demo`를 실행합니다.
+2. **키워드 승인**을 누릅니다. 카드가 승인 완료로 바뀌고 별도 데모 DB에 워크아이템,
+   승인 결정과 감사 이벤트, `draft_content` 대기열 작업이 기록됩니다.
+3. 새 카드에서 반려 또는 수정 요청을 선택하면 사유가 필요하며 초안 작업은 생성되지 않습니다.
+4. Slack 카드 갱신에 실패하면 카드에 표시된 승인 요청 ID로
+   `/hermes-test approval-demo <요청-ID>`를 실행해 현재 상태를 다시 표시합니다.
+
+이 명령은 합성 데이터를 사용하며 초안 작업을 대기열에 넣는 데까지 진행합니다.
+콘텐츠 워커, 모델 호출, CMS 발행, 광고 실행은 여기서 시작하지 않습니다.

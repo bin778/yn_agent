@@ -181,6 +181,25 @@ class CodexProviderTest(unittest.TestCase):
             self.assertIsInstance(result, model)
         self.assertEqual(4, len(runner.exec_calls))
 
+    def test_cli_schema_requires_defaulted_fields_at_top_level_and_in_refs(self):
+        runner = FakeRunner([
+            '{"target_keyword":"예시","title":"예시","hook":"예시","body":"예시","reason":"예시"}',
+            '{"items":[]}',
+        ])
+        client = client_for(runner)
+        draft = client.call_structured("system", "user", ContentEditorOutput)
+        self.assertEqual(draft.flagged_claims, [])
+        client.call_structured("system", "user", KeywordAnalystOutput)
+
+        content_schema, keyword_schema = runner.schemas
+        self.assertEqual(content_schema["required"], list(content_schema["properties"]))
+        self.assertIn("flagged_claims", content_schema["required"])
+        self.assertIn("sensitive_flags", content_schema["required"])
+        nested = keyword_schema["$defs"]["KeywordItem"]
+        self.assertEqual(nested["required"], list(nested["properties"]))
+        self.assertFalse(nested["additionalProperties"])
+        self.assertNotIn("default", nested["properties"]["compliance_note"])
+
     def test_schema_failure_retries_then_succeeds(self):
         valid = json.dumps({"status_summary": "Normal", "reason": "ok"})
         runner = FakeRunner(["not-json", valid])

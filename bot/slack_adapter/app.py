@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from ..config import DB_PATH
+from ..slack_approval_demo import ACTIONS as DEMO_ACTIONS
+from ..slack_approval_demo import COMMAND as DEMO_COMMAND
+from ..slack_approval_demo import REASON_MODAL as DEMO_REASON_MODAL
+from ..slack_approval_demo import ApprovalDemo
 from .blocks import render_action_modal, render_test_card, test_card_text
 from .config import (
     SlackConfigurationError,
@@ -342,10 +348,29 @@ def handle_view_submission(
                 )
 
 
-def register_handlers(app: App, deps: SlackDependencies) -> None:
+def register_handlers(
+    app: App, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None
+) -> None:
     @app.command(COMMAND)
     def _command(ack, command, respond, client):
+        words = str(command.get("text", "")).lower().split(maxsplit=1)
+        if approval_demo is not None and words and words[0] == DEMO_COMMAND:
+            approval_demo.handle_command(ack=ack, command=command, respond=respond, client=client)
+            return
         handle_command(ack=ack, command=command, respond=respond, client=client, deps=deps)
+
+    if approval_demo is not None:
+        def _demo_action(ack, body, action, respond, client):
+            approval_demo.handle_action(
+                ack=ack, body=body, action=action, respond=respond, client=client
+            )
+
+        for action_id in DEMO_ACTIONS:
+            app.action(action_id)(_demo_action)
+
+        @app.view(DEMO_REASON_MODAL)
+        def _demo_view(ack, body, client):
+            approval_demo.handle_view(ack=ack, body=body, client=client)
 
     def _action(ack, body, action, respond, client):
         handle_action(
@@ -381,19 +406,36 @@ def verify_slack_workspace(client: Any, mapping: SlackMapping) -> dict:
     }
 
 
-def create_app(settings: SlackSettings, deps: SlackDependencies) -> App:
+def create_app(
+    settings: SlackSettings, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None
+) -> App:
     settings.validate_runtime()
     app = App(token=settings.bot_token)
     verify_slack_workspace(app.client, deps.mapping)
-    register_handlers(app, deps)
+    register_handlers(app, deps, approval_demo)
     return app
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the Hermes Slack Socket Mode adapter.")
+    parser.add_argument(
+        "--approval-demo-db", type=Path,
+        help="enable the development approval demo with its own SQLite file",
+    )
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = SlackSettings.from_env()
     deps = build_dependencies(settings)
-    app = create_app(settings, deps)
+    approval_demo = None
+    if args.approval_demo_db is not None:
+        demo_path = args.approval_demo_db.expanduser().resolve()
+        phase3_path = DB_PATH.expanduser().resolve()
+        if demo_path == phase3_path or (
+            demo_path.exists() and phase3_path.exists() and demo_path.samefile(phase3_path)
+        ):
+            parser.error("--approval-demo-db must use a separate file from HERMES_DB_PATH")
+        approval_demo = ApprovalDemo(deps.mapping, demo_path)
+    app = create_app(settings, deps, approval_demo)
     LOGGER.info("Phase 3 Slack Socket Mode starting workspace=%s", deps.mapping.workspace_id)
     try:
         SocketModeHandler(app, settings.app_token).start()

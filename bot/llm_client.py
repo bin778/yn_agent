@@ -78,15 +78,24 @@ def _codex_environment() -> dict[str, str]:
 
 
 def _strict_object_schema(value: object) -> None:
-    """Forbid undeclared object keys throughout a generated JSON Schema."""
-    if isinstance(value, dict):
-        if value.get("type") == "object" or "properties" in value:
-            value.setdefault("additionalProperties", False)
-        for child in value.values():
+    """Convert a Pydantic schema to the CLI's strict structured-output schema."""
+    if not isinstance(value, dict):
+        return
+
+    value.pop("default", None)
+    properties = value.get("properties", {})
+    if value.get("type") == "object" or "properties" in value:
+        value["additionalProperties"] = False
+        value["required"] = list(properties)
+
+    for key in ("properties", "$defs", "definitions"):
+        for child in value.get(key, {}).values():
             _strict_object_schema(child)
-    elif isinstance(value, list):
-        for child in value:
+    _strict_object_schema(value.get("items"))
+    for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+        for child in value.get(key, ()):
             _strict_object_schema(child)
+
 
 
 class CodexCLIClient:

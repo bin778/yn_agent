@@ -185,6 +185,14 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             work_item_version INTEGER NOT NULL,
             output_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS slack_approval_demo_cards (
+            request_id TEXT NOT NULL REFERENCES approval_requests(request_id),
+            team_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            message_ts TEXT NOT NULL,
+            PRIMARY KEY (request_id, team_id, channel_id),
+            UNIQUE (team_id, channel_id, message_ts)
+        );
         CREATE TABLE IF NOT EXISTS slack_test_sessions (
             session_id TEXT PRIMARY KEY,
             command_id TEXT NOT NULL UNIQUE,
