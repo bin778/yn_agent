@@ -79,6 +79,21 @@ Timeout은 실패로 추측하지 않고 `unknown`으로 기록한다. 외부 �
 - 모든 상태 변화에는 서비스 actor, 작업 버전, 사유, correlation ID를 포함한
   `audit_events`가 남는다.
 
+## 승인된 콘텐츠 한 건의 발행 dry-run
+
+Slack에서 승인한 콘텐츠에 발행 검토 작업이 등록된 상태에서 개발 DB와 콘텐츠 승인
+요청 ID를 지정합니다.
+
+```bash
+python -m scripts.verify_publish_dry_run \
+  --db "$HOME/.hermes/hermes-approval-demo.db" \
+  --approval-request-id "콘텐츠-승인-요청-ID"
+```
+
+CLI는 원본을 읽기 전용으로 열고 임시 SQLite 복사본에서만 실행 기록을 생성합니다.
+정상 요청과 재전송을 확인한 뒤, 별도 복사본에서 이전 버전, 변조된 본문, 긴급 중지를
+검증합니다. 결과에는 상태와 실행 시도 횟수만 표시하며 원본 대기열은 소비하지 않습니다.
+
 ## Gate
 
 ```bash

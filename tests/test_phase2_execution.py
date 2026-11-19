@@ -15,6 +15,7 @@ from bot.execution import (
     execute_request,
 )
 from bot.workflow import ActorContext, create_work_item, decide
+from scripts.verify_publish_dry_run import VerificationError, verify_publish_dry_run
 
 
 POLICY_VERSION = "phase0-implementation-baseline"
@@ -366,6 +367,24 @@ class Phase2ExecutionTest(unittest.TestCase):
         self.assertTrue(second.duplicate)
         self.assertEqual(first.execution_request_id, second.execution_request_id)
         self.assertEqual(len(adapter.calls), 1)
+
+    def test_publish_verifier_uses_queue_item_without_writing_to_source(self):
+        item = self.content_item(output={"body": "original", "flagged_claims": []})
+        source_before = self.db.read_bytes()
+        report = verify_publish_dry_run(self.db, item["request_id"])
+        self.assertEqual(report["status"], "dry_run_succeeded")
+        self.assertEqual(report["execution_attempts"], 1)
+        self.assertFalse(report["transmitted"])
+        self.assertTrue(report["duplicate_reused_result"])
+        self.assertEqual(report["blocked_without_adapter"], [
+            "stale_work_item_version", "payload_not_approved", "kill_switch_active",
+        ])
+        self.assertEqual(self.db.read_bytes(), source_before)
+
+    def test_publish_verifier_rejects_content_without_approved_publish_handoff(self):
+        item = self.content_item(approve=False)
+        with self.assertRaisesRegex(VerificationError, "pending publish handoff"):
+            verify_publish_dry_run(self.db, item["request_id"])
 
     def test_timeout_becomes_unknown_and_is_never_retried(self):
         item = self.content_item()
