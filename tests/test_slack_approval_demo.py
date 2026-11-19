@@ -8,7 +8,7 @@ from bot.db import get_conn, utc_iso, utc_now
 from bot.slack_adapter.app import build_dependencies, register_handlers
 from bot.slack_adapter.config import SlackSettings
 from bot.slack_approval_demo import ACTION_ID, REASON_MODAL, ApprovalDemo
-from bot.workflow import get_approval_state
+from bot.workflow import claim_handoffs, complete_handoff, create_work_item, get_approval_state
 
 
 class SlackApprovalDemoTest(unittest.TestCase):
@@ -46,11 +46,11 @@ queue_channels:
         self.respond = Mock()
         self.ack = Mock()
 
-    def command(self, text="approval-demo"):
+    def command(self, text="approval-demo", *, user="UDEMO"):
         self.slash_handlers["/hermes-test"](
             ack=self.ack, command={
                 "text": text, "team_id": "TDEMO", "channel_id": "CDEMO",
-                "user_id": "UDEMO", "trigger_id": "same-delivery",
+                "user_id": user, "trigger_id": "same-delivery",
             }, respond=self.respond, client=self.client,
         )
 
@@ -155,3 +155,72 @@ queue_channels:
                 self.assertEqual(state["decisions"][0]["reason"], "테스트 사유")
         with closing(get_conn(self.db_path)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM handoff_jobs").fetchone()[0], 0)
+
+    def create_content_request(self, *, demo_source=True, flags=None):
+        correlation_id = None
+        if demo_source:
+            self.command()
+            self.approve(self.button())
+            [handoff] = claim_handoffs("draft_content", db_path=self.db_path)
+            correlation_id = handoff["correlation_id"]
+        content = create_work_item(
+            agent_id="content_editor",
+            output={
+                "title": "합성 초안", "hook": "도입부", "body": "본문입니다. " * 300,
+                "flagged_claims": flags or [], "sensitive_flags": [],
+            },
+            routed_to="publish_queue",
+            model_version=None,
+            input_summary="합성 키워드",
+            correlation_id=correlation_id,
+            db_path=self.db_path,
+        )
+        if demo_source:
+            complete_handoff(handoff["handoff_id"], handoff["claim_token"], db_path=self.db_path)
+            self.client.chat_postMessage.return_value = {"ts": "111.444"}
+        return content["request_id"]
+
+    def test_content_review_publishes_existing_draft_and_queues_one_publish_review(self):
+        request_id = self.create_content_request()
+        command = f"content-review {request_id}"
+        self.command(command)
+        self.assertEqual(self.client.chat_postMessage.call_count, 1)
+        self.command(command, user="UOTHER")
+        value = self.button()
+        blocks = self.client.chat_update.call_args.kwargs["blocks"]
+        sections = [block["text"] for block in blocks if block["type"] == "section"]
+        self.assertGreaterEqual(len(sections), 3)
+        self.assertTrue(all(section["type"] == "plain_text" for section in sections))
+        self.assertIn("합성 초안", sections[0]["text"])
+        self.assertIn("필요 역할: content_approver", sections[0]["text"])
+        self.assertIn("위험 플래그: 없음", sections[1]["text"])
+        self.assertEqual("".join(section["text"] for section in sections[1:]).count("본문입니다."), 300)
+
+        self.command(command, user="UOTHER")
+        self.assertEqual(self.client.chat_postMessage.call_count, 2)
+        self.approve(value, ts="111.444")
+        self.assertEqual(get_approval_state(request_id, self.db_path)["status"], "pending")
+        self.approve(value, user="UOTHER", ts="111.444")
+        self.approve(value, user="UOTHER", ts="111.444")
+        state = get_approval_state(request_id, self.db_path)
+        self.assertEqual(state["status"], "approved")
+        self.assertEqual([decision["actor_role"] for decision in state["decisions"]], ["content_approver"])
+        self.assertIn("발행 검토 대기열 등록", self.client.chat_update.call_args.kwargs["text"])
+        with closing(get_conn(self.db_path)) as conn:
+            jobs = conn.execute(
+                "SELECT handoff_type, target, status FROM handoff_jobs WHERE work_item_id=?",
+                (state["work_item_id"],),
+            ).fetchall()
+            self.assertEqual([tuple(job) for job in jobs], [("queue_for_publish", "publish_queue", "pending")])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM execution_requests").fetchone()[0], 0)
+
+    def test_content_review_does_not_publish_a_draft_without_demo_lineage(self):
+        request_id = self.create_content_request(demo_source=False)
+        self.command(f"content-review {request_id}", user="UOTHER")
+        self.client.chat_postMessage.assert_not_called()
+
+    def test_content_review_does_not_expose_multi_role_draft_in_single_role_demo(self):
+        request_id = self.create_content_request(flags=["outcome_guarantee"])
+        self.command(f"content-review {request_id}", user="UOTHER")
+        self.assertEqual(self.client.chat_postMessage.call_count, 1)
+        self.assertEqual(get_approval_state(request_id, self.db_path)["status"], "pending")

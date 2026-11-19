@@ -7,6 +7,7 @@ import logging
 import threading
 import uuid
 from contextlib import closing
+from html import escape
 from pathlib import Path
 
 from . import workflow
@@ -15,6 +16,8 @@ from .schemas import KeywordItem
 from .slack_adapter.config import SlackConfigurationError, SlackMapping, SlackIdentityProvider
 
 COMMAND = "approval-demo"
+CONTENT_COMMAND = "content-review"
+COMMANDS = frozenset({COMMAND, CONTENT_COMMAND})
 ACTION_ID = "phase4_demo_approve"
 ACTIONS: dict[str, tuple[str, workflow.Decision]] = {
     ACTION_ID: ("키워드 승인", "approved"),
@@ -22,7 +25,9 @@ ACTIONS: dict[str, tuple[str, workflow.Decision]] = {
     "phase4_demo_revision": ("수정 요청", "revision_requested"),
 }
 REASON_MODAL = "phase4_demo_reason"
-ROLE = "keyword_approver"
+KEYWORD_ROLE = "keyword_approver"
+CONTENT_ROLE = "content_approver"
+ROLES = {COMMAND: KEYWORD_ROLE, CONTENT_COMMAND: CONTENT_ROLE}
 CREATOR = "system:slack-approval-demo"
 LOGGER = logging.getLogger("hermes.slack.approval_demo")
 KEYWORD = KeywordItem(
@@ -36,32 +41,53 @@ KEYWORD = KeywordItem(
 
 
 def render_card(state: dict) -> tuple[str, list[dict]]:
+    is_content = state["command"] == CONTENT_COMMAND
+    approved_status = (
+        "승인 완료 · 발행 검토 대기열 등록"
+        if is_content else "승인 완료 · 콘텐츠 초안 작업 대기열 등록"
+    )
     status = {
         "pending": "승인 대기",
-        "approved": "승인 완료 · 콘텐츠 초안 작업 대기열 등록",
+        "approved": approved_status,
         "rejected": "반려",
         "revision_requested": "수정 요청",
         "expired": "만료",
         "cancelled": "취소",
     }[state["status"]]
+    output = state["output"]
+    subject = output["title"] if is_content else output["keyword"]
+    item_type = "합성 키워드 기반 콘텐츠 초안" if is_content else "합성 키워드"
     text = (
-        f"PHASE 4 개발 검증 · 합성 키워드\n"
-        f"{KEYWORD.keyword}\n"
+        f"PHASE 4 개발 검증 · {item_type}\n"
+        f"{subject[:300]}\n"
         f"상태: {status}\n"
-        f"승인 요청: {state['request_id']} · 버전 {state['version']}"
+        f"승인 요청: {state['request_id']} · 버전 {state['version']}\n"
+        f"필요 역할: {state['role']}\n"
+        f"만료: {state['expires_at']}"
     )
-    blocks = [{"type": "section", "text": {"type": "plain_text", "text": text}}]
+    sections = [text]
+    if is_content:
+        flags = output.get("flagged_claims", []) + output.get("sensitive_flags", [])
+        draft = (
+            f"위험 플래그: {', '.join(flags) or '없음'}\n\n"
+            f"{output['hook']}\n\n{output['body']}"
+        )
+        sections.extend(draft[pos:pos + 1400] for pos in range(0, len(draft), 1400))
+
+    blocks = [{"type": "section", "text": {"type": "plain_text", "text": section}} for section in sections]
     if state["status"] == "pending":
         blocks.append({
             "type": "actions",
             "elements": [{
                 "type": "button",
                 "action_id": action_id,
-                "text": {"type": "plain_text", "text": label},
+                "text": {"type": "plain_text", "text": "콘텐츠 승인" if is_content and action_id == ACTION_ID else label},
                 "value": f"{state['request_id']}:{state['version']}",
             } for action_id, (label, _) in ACTIONS.items()],
         })
-    return text, blocks
+    if len(blocks) > 50:
+        raise ValueError("approval card exceeds Slack block limit")
+    return escape(text, quote=False), blocks
 
 
 class ApprovalDemo:
@@ -73,21 +99,47 @@ class ApprovalDemo:
     def _actor(self, team_id: str, channel_id: str, user_id: str) -> workflow.ActorContext:
         actor = self.identity.actor_for(team_id, user_id)
         self.identity.require_development_channel(channel_id)
-        if ROLE not in actor.roles:
-            raise SlackConfigurationError("keyword approval role is required")
         return workflow.ActorContext.verified_actor(actor.actor_id, actor.roles, platform="slack")
+
+    @staticmethod
+    def _require_role(actor: workflow.ActorContext, role: str) -> None:
+        if role not in actor.roles:
+            raise SlackConfigurationError("required approval role is missing")
 
     def _state(self, request_id: str) -> dict:
         state = workflow.get_approval_state(request_id, self.db_path)
         work = get_work_item(state["work_item_id"], state["version"], self.db_path)
+        required_roles = {entry["role"] for entry in state["requirements"]}
         if (
-            work is None
-            or work["created_by"] != CREATOR
-            or work["agent_id"] != "keyword_analyst"
-            or {entry["role"] for entry in state["requirements"]} != {ROLE}
+            work is not None
+            and work["created_by"] == CREATOR
+            and work["agent_id"] == "keyword_analyst"
+            and required_roles == {KEYWORD_ROLE}
         ):
-            raise workflow.NotFoundError("not an approval demo request")
-        return state
+            return {**state, "command": COMMAND, "role": KEYWORD_ROLE, "output": work["output"]}
+
+        if (
+            work is not None
+            and work["created_by"] == "agent:content_editor"
+            and work["agent_id"] == "content_editor"
+            and required_roles == {CONTENT_ROLE}
+            and self._has_demo_source(work["correlation_id"])
+        ):
+            return {**state, "command": CONTENT_COMMAND, "role": CONTENT_ROLE, "output": work["output"]}
+
+        raise workflow.NotFoundError("not an eligible development approval request")
+
+    def _has_demo_source(self, correlation_id: str) -> bool:
+        # This channel is for synthetic development work. Require the content
+        # worker's completed handoff from the synthetic keyword demo.
+        with closing(get_conn(self.db_path)) as conn:
+            return conn.execute(
+                """SELECT 1 FROM handoff_jobs h
+                   JOIN work_items w ON w.work_item_id=h.work_item_id AND w.version=h.work_item_version
+                   WHERE h.correlation_id=? AND h.handoff_type='draft_content'
+                     AND h.status='completed' AND w.agent_id='keyword_analyst' AND w.created_by=?""",
+                (correlation_id, CREATOR),
+            ).fetchone() is not None
 
     def _request(self, team_id: str, trigger_id: str) -> str:
         if not trigger_id:
@@ -113,6 +165,7 @@ class ApprovalDemo:
 
     def _publish(self, client, team_id: str, channel_id: str, state: dict) -> None:
         request_id = state["request_id"]
+        text, blocks = render_card(state)
         with closing(get_conn(self.db_path)) as conn:
             row = conn.execute(
                 """SELECT message_ts FROM slack_approval_demo_cards
@@ -134,7 +187,7 @@ class ApprovalDemo:
                     )
             else:
                 message_ts = row["message_ts"]
-        self._update(client, channel_id, message_ts, state)
+        client.chat_update(channel=channel_id, ts=message_ts, text=text, blocks=blocks)
 
     @staticmethod
     def _update(client, channel_id: str, message_ts: str, state: dict) -> None:
@@ -144,24 +197,32 @@ class ApprovalDemo:
     def handle_command(self, *, ack, command: dict, respond, client) -> None:
         ack()
         request_id = None
+        subcommand = COMMAND
         try:
             team_id = command["team_id"]
             channel_id = command["channel_id"]
-            self._actor(team_id, channel_id, command["user_id"])
-            arguments = command["text"].split()[1:]
-            if len(arguments) > 1:
-                raise ValueError("too many arguments")
+            actor = self._actor(team_id, channel_id, command["user_id"])
+            name, *arguments = command["text"].split()
+            subcommand = name.lower()
+            self._require_role(actor, ROLES[subcommand])
+            if len(arguments) > 1 or (subcommand == CONTENT_COMMAND and not arguments):
+                respond(response_type="ephemeral", text=f"사용법: `/hermes-test {subcommand} <승인 요청 ID>`")
+                return
             with self.publish_lock:
                 request_id = (
                     str(uuid.UUID(arguments[0])) if arguments
                     else self._request(team_id, command.get("trigger_id", ""))
                 )
-                self._publish(client, team_id, channel_id, self._state(request_id))
+                state = self._state(request_id)
+                latest = get_work_item(state["work_item_id"], db_path=self.db_path)
+                if state["command"] != subcommand or latest is None or latest["version"] != state["version"]:
+                    raise workflow.NotFoundError("request does not match this command or version")
+                self._publish(client, team_id, channel_id, state)
         except (KeyError, ValueError, SlackConfigurationError, workflow.NotFoundError):
-            respond(response_type="ephemeral", text="개발 채널, 키워드 승인 역할과 요청 ID를 확인해 주세요.")
+            respond(response_type="ephemeral", text="개발 채널, 승인 역할과 요청 ID를 확인해 주세요.")
         except Exception as exc:
             LOGGER.warning("approval demo card failed error_type=%s", type(exc).__name__)
-            retry = f" `/hermes-test {COMMAND} {request_id}`로 다시 표시할 수 있습니다." if request_id else ""
+            retry = f" `/hermes-test {subcommand} {request_id}`로 다시 표시할 수 있습니다." if request_id else ""
             respond(response_type="ephemeral", text=f"승인 카드를 표시하지 못했습니다.{retry}")
 
     def _bound_state(self, team_id, channel_id, message_ts, request_id, version) -> dict:
@@ -185,13 +246,14 @@ class ApprovalDemo:
         version, decision: workflow.Decision, reason: str | None = None,
     ) -> None:
         with self.publish_lock:
-            self._bound_state(team_id, channel_id, message_ts, request_id, version)
+            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
+            self._require_role(actor, state["role"])
             try:
                 workflow.decide(
                     request_id=request_id,
                     expected_version=version,
                     actor=actor,
-                    acting_role=ROLE,
+                    acting_role=state["role"],
                     decision=decision,
                     reason=reason,
                     db_path=self.db_path,
@@ -204,6 +266,7 @@ class ApprovalDemo:
     def handle_action(self, *, ack, body: dict, action: dict, respond, client) -> None:
         ack()
         request_id = None
+        subcommand = None
         try:
             team_id = body.get("team", {}).get("id", "")
             channel_id = body.get("channel", {}).get("id", "")
@@ -213,13 +276,15 @@ class ApprovalDemo:
             request_id = str(uuid.UUID(raw_id))
             version = int(raw_version)
             label, decision = ACTIONS[action["action_id"]]
+            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
+            self._require_role(actor, state["role"])
+            subcommand = state["command"]
             if decision == "approved":
                 self._apply(
                     client=client, actor=actor, team_id=team_id, channel_id=channel_id,
                     message_ts=message_ts, request_id=request_id, version=version, decision=decision,
                 )
                 return
-            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
             if state["status"] != "pending":
                 raise workflow.StaleActionError("request is already closed")
             client.views_open(trigger_id=body["trigger_id"], view={
@@ -242,7 +307,10 @@ class ApprovalDemo:
             respond(response_type="ephemeral", text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
         except Exception as exc:
             LOGGER.warning("approval demo action failed error_type=%s", type(exc).__name__)
-            retry = f" `/hermes-test {COMMAND} {request_id}`로 현재 상태를 확인해 주세요." if request_id else ""
+            retry = (
+                f" `/hermes-test {subcommand} {request_id}`로 현재 상태를 확인해 주세요."
+                if subcommand else ""
+            )
             respond(response_type="ephemeral", text=f"승인 상태를 표시하지 못했습니다.{retry}")
 
     def handle_view(self, *, ack, body: dict, client) -> None:

@@ -14,7 +14,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from ..config import DB_PATH
 from ..slack_approval_demo import ACTIONS as DEMO_ACTIONS
-from ..slack_approval_demo import COMMAND as DEMO_COMMAND
+from ..slack_approval_demo import COMMANDS as DEMO_COMMANDS
 from ..slack_approval_demo import REASON_MODAL as DEMO_REASON_MODAL
 from ..slack_approval_demo import ApprovalDemo
 from .blocks import render_action_modal, render_test_card, test_card_text
@@ -354,7 +354,7 @@ def register_handlers(
     @app.command(COMMAND)
     def _command(ack, command, respond, client):
         words = str(command.get("text", "")).lower().split(maxsplit=1)
-        if approval_demo is not None and words and words[0] == DEMO_COMMAND:
+        if approval_demo is not None and words and words[0] in DEMO_COMMANDS:
             approval_demo.handle_command(ack=ack, command=command, respond=respond, client=client)
             return
         handle_command(ack=ack, command=command, respond=respond, client=client, deps=deps)
