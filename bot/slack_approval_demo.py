@@ -60,10 +60,13 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     card_title = state.get("card_title", f"PHASE 4 개발 검증 · {item_type}")
     role_label = state.get("role_label", "필요 역할")
     expires_at = state.get("expiry_label", state["expires_at"])
+    progress = state.get("approval_progress")
+    progress_line = f"승인 진행: {progress}\n" if progress else ""
     text = (
         f"{card_title}\n"
         f"{subject[:300]}\n"
         f"상태: {status}\n"
+        f"{progress_line}"
         f"승인 요청: {state['request_id']} · 버전 {state['version']}\n"
         f"{role_label}: {state['role']}\n"
         f"만료: {expires_at}"
@@ -179,7 +182,7 @@ class SlackApprovalCards:
     def _apply(
         self, *, client, actor, team_id, channel_id, message_ts, request_id,
         version, decision: workflow.Decision, reason: str | None = None,
-    ) -> None:
+    ) -> dict:
         with self.publish_lock:
             state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
             acting_role = self._acting_role(actor, state)
@@ -196,7 +199,9 @@ class SlackApprovalCards:
             except workflow.StaleActionError:
                 self._update(client, channel_id, message_ts, self._state(request_id))
                 raise
-            self._update(client, channel_id, message_ts, self._state(request_id))
+            updated = self._state(request_id)
+            self._update(client, channel_id, message_ts, updated)
+            return updated
 
     def handle_action(self, *, ack, body: dict, action: dict, respond, client) -> None:
         ack()
@@ -215,10 +220,15 @@ class SlackApprovalCards:
             self._acting_role(actor, state)
             subcommand = state["command"]
             if decision == "approved":
-                self._apply(
+                updated = self._apply(
                     client=client, actor=actor, team_id=team_id, channel_id=channel_id,
                     message_ts=message_ts, request_id=request_id, version=version, decision=decision,
                 )
+                if feedback := updated.get("approval_feedback"):
+                    try:
+                        respond(response_type="ephemeral", text=feedback)
+                    except Exception as exc:
+                        LOGGER.warning("Slack approval confirmation failed error_type=%s", type(exc).__name__)
                 return
             if state["status"] != "pending":
                 raise workflow.StaleActionError("request is already closed")

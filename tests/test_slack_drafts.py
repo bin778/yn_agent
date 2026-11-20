@@ -78,11 +78,16 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertIn("상담 준비", self.call_model.call_args.kwargs["user_prompt"])
         self.assertEqual(self.client.chat_postMessage.call_args.kwargs["channel"], "CDRAFT")
         self.assertIn("상담 전 준비하기", self.client.chat_update.call_args.kwargs["text"])
+        self.assertIn("승인 진행: 0/1명", self.client.chat_update.call_args.kwargs["text"])
         self.client.chat_postMessage.assert_called_once()
         request_id = self.approval_button().split(":")[0]
         self.approve()
         self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
         self.assertIn("발행 검토 대기열 등록", self.client.chat_update.call_args.kwargs["text"])
+        self.assertIn("승인 진행: 1/1명", self.client.chat_update.call_args.kwargs["text"])
+        self.respond.assert_called_with(
+            response_type="ephemeral", text="승인 완료 (1/1명) · 발행 검토 대기열에 등록했습니다.",
+        )
         with closing(get_conn(self.db)) as conn:
             self.assertEqual(conn.execute("SELECT handoff_type FROM handoff_jobs").fetchone()[0],
                              "queue_for_publish")
@@ -110,7 +115,12 @@ class SlackDraftsTest(unittest.TestCase):
         self.approve()
         self.assertEqual(get_approval_state(request_id, self.db)["status"], "pending")
         self.assertIn("승인 권한: 법무·컴플라이언스 승인자", self.client.chat_update.call_args.kwargs["text"])
+        self.assertIn("승인 진행: 1/2명", self.client.chat_update.call_args.kwargs["text"])
+        self.respond.assert_called_with(
+            response_type="ephemeral", text="승인 진행 1/2명 · 남은 승인 권한: 법무·컴플라이언스 승인자",
+        )
         self.approve("ULEGAL")
+        self.assertIn("승인 진행: 2/2명", self.client.chat_update.call_args.kwargs["text"])
         decisions = get_approval_state(request_id, self.db)["decisions"]
         self.assertEqual({item["actor_role"] for item in decisions}, {"content_approver", "legal_compliance"})
         self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")

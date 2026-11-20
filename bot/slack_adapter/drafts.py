@@ -86,10 +86,23 @@ class SlackDrafts(SlackApprovalCards):
         roles = remaining if state["status"] == "pending" else [
             entry["role"] for entry in state["requirements"]
         ]
+        approved_count = len({
+            decision["actor_id"] for decision in state["decisions"]
+            if decision["decision"] == "approved"
+        })
+        required_count = sum(entry["required"] for entry in state["requirements"])
+        progress = f"{approved_count}/{required_count}명"
+        role_names = ", ".join(APPROVAL_LABELS.get(role, role) for role in roles)
+        if state["status"] == "approved":
+            approval_feedback = f"승인 완료 ({progress}) · 발행 검토 대기열에 등록했습니다."
+        else:
+            approval_feedback = f"승인 진행 {progress} · 남은 승인 권한: {role_names}"
         return {
             **state,
             "command": CONTENT_COMMAND,
-            "role": ", ".join(APPROVAL_LABELS.get(role, role) for role in roles),
+            "role": role_names,
+            "approval_progress": progress,
+            "approval_feedback": approval_feedback,
             "role_label": "승인 권한",
             "expiry_label": _expiry_label(state["expires_at"]),
             "card_title": "Hermes · 콘텐츠 초안",
