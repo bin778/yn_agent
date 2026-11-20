@@ -13,11 +13,14 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 from threading import Event
+from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from .. import workflow
 from ..agents.content_editor import assess_edited_content, draft_from_topic
 from ..db import get_conn, get_work_item
+from ..execution import ExecutionSettings
+from ..workflow import ContentApprovalMode
 from ..slack_approval_demo import CONTENT_COMMAND, SlackApprovalCards, render_card
 from .config import SlackConfigurationError, SlackMapping
 
@@ -29,6 +32,25 @@ EDIT_MODAL = "hermes_draft_edit_save"
 EDIT_FIELDS = {"title": "제목", "hook": "도입부", "body": "본문"}
 APPROVAL_LABELS = {"content_approver": "콘텐츠 승인자", "legal_compliance": "법무·컴플라이언스 승인자"}
 SEOUL = ZoneInfo("Asia/Seoul")
+
+
+def approval_mode_from_env(env: Mapping[str, str]) -> ContentApprovalMode:
+    raw_mode = env.get("SLACK_CONTENT_APPROVAL_MODE", ContentApprovalMode.RISK_BASED.value)
+    try:
+        mode = ContentApprovalMode(raw_mode.strip().lower())
+    except ValueError as exc:
+        raise SlackConfigurationError(
+            "SLACK_CONTENT_APPROVAL_MODE must be risk_based or single"
+        ) from exc
+    if mode is ContentApprovalMode.SINGLE:
+        execution = ExecutionSettings.from_env(env)
+        if (execution.app_env != "staging" or execution.enabled or execution.mode != "disabled"
+                or execution.configuration_errors):
+            raise SlackConfigurationError(
+                "SLACK_CONTENT_APPROVAL_MODE=single requires APP_ENV=staging, "
+                "EXECUTION_ENABLED=false, and EXECUTION_MODE=disabled"
+            )
+    return mode
 
 
 def _expiry_label(timestamp: str) -> str:
@@ -55,12 +77,16 @@ class SlackDrafts(SlackApprovalCards):
     }
     reason_modal = "hermes_draft_reason"
 
-    def __init__(self, mapping: SlackMapping, db_path: Path, channel_id: str):
+    def __init__(
+        self, mapping: SlackMapping, db_path: Path, channel_id: str,
+        *, approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
+    ):
         if not re.fullmatch(r"[CG][A-Z0-9]+", channel_id):
             raise SlackConfigurationError("SLACK_DRAFT_CHANNEL_ID must be a Slack channel ID")
         super().__init__(mapping, db_path)
         self.workspace_id = mapping.workspace_id
         self.channel_id = channel_id
+        self.approval_mode = approval_mode
 
     def _actor(self, team_id: str, channel_id: str, user_id: str) -> workflow.ActorContext:
         if channel_id != self.channel_id:
@@ -382,7 +408,10 @@ class SlackDrafts(SlackApprovalCards):
                 ).fetchone()
             if request is None:
                 try:
-                    request = draft_from_topic(job["topic"], work_item_id=job_id, db_path=self.db_path)
+                    request = draft_from_topic(
+                        job["topic"], work_item_id=job_id, db_path=self.db_path,
+                        content_approval_mode=self.approval_mode,
+                    )
                 except sqlite3.Error:
                     raise
                 except Exception as exc:

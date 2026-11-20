@@ -134,6 +134,14 @@ HERMES_DB_PATH="$HOME/.hermes/hermes-dev.db" \
    편집할 수 있습니다. 저장하면 위험 항목 검토 후 같은 카드가 새 버전의 승인
    대기로 돌아갑니다. 만료 시각은 카드에 한국 시간으로 표시됩니다.
 
+개인 스테이징에서 혼자 승인 흐름을 검증하려면 `/etc/hermes/hermes.env`에
+`SLACK_CONTENT_APPROVAL_MODE=single`을 넣고 서비스를 재시작합니다.
+`APP_ENV=staging`, `EXECUTION_ENABLED=false`, `EXECUTION_MODE=disabled` 상태에서 사용할
+수 있습니다. 새 초안은 위험 플래그를 표시하면서 콘텐츠 승인자 1명의 승인을 받습니다.
+기존 요청과 해당 초안의 수정본은 처음 저장한 승인 모드를 따릅니다.
+운영 기본값인 `risk_based`에서는 위험 플래그가 있는 초안에 서로 다른 두 계정의 승인이
+필요합니다.
+
 요청, 초안, 승인 결과는 `HERMES_DB_PATH`에 기록됩니다. 카드 게시가 실패하면
 워커가 저장된 초안으로 다시 시도합니다. 승인 완료 후 발행 검토 대기열에 등록되며,
 dry-run 검증은 같은 DB에서 카드의 콘텐츠 승인 요청 ID를 지정해 실행할 수 있습니다.

@@ -27,7 +27,7 @@ from .config import (
 )
 from .drafts import COMMAND as DRAFT_COMMAND
 from .drafts import EDIT_ACTION, EDIT_MODAL
-from .drafts import SlackDrafts
+from .drafts import SlackDrafts, approval_mode_from_env
 from .fixtures import SlackTestFixture, load_test_fixture
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
 
@@ -458,14 +458,22 @@ def main() -> int:
             parser.error("--approval-demo-db must use a separate file from HERMES_DB_PATH")
         approval_demo = ApprovalDemo(deps.mapping, demo_path)
     draft_channel = os.environ.get("SLACK_DRAFT_CHANNEL_ID", "").strip()
-    drafts = SlackDrafts(deps.mapping, DB_PATH, draft_channel) if draft_channel else None
+    drafts = None
+    if draft_channel:
+        try:
+            approval_mode = approval_mode_from_env(os.environ)
+        except SlackConfigurationError as exc:
+            parser.error(str(exc))
+        drafts = SlackDrafts(deps.mapping, DB_PATH, draft_channel, approval_mode=approval_mode)
     app = create_app(settings, deps, approval_demo, drafts=drafts)
     handler = SocketModeHandler(app, settings.app_token)
     stop = Event()
     if drafts is not None:
         Thread(target=drafts.run, args=(app.client, stop), name="slack-drafts", daemon=True).start()
-    LOGGER.info("Slack Socket Mode starting workspace=%s draft_requests=%s",
-                deps.mapping.workspace_id, drafts is not None)
+    LOGGER.info(
+        "Slack Socket Mode starting workspace=%s draft_requests=%s content_approval_mode=%s",
+        deps.mapping.workspace_id, drafts is not None, drafts.approval_mode.value if drafts else "off",
+    )
     try:
         handler.start()
     except KeyboardInterrupt:

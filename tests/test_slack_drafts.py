@@ -9,9 +9,11 @@ from bot.agents.content_editor import ContentRiskAssessment
 from bot.db import get_conn, get_work_item
 from bot.schemas import ContentEditorOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
-from bot.slack_adapter.config import SlackMapping, SlackSettings
-from bot.slack_adapter.drafts import COMMAND, EDIT_ACTION, EDIT_MODAL, SlackDrafts, _expiry_label
-from bot.workflow import get_approval_state
+from bot.slack_adapter.config import SlackConfigurationError, SlackMapping, SlackSettings
+from bot.slack_adapter.drafts import (
+    COMMAND, EDIT_ACTION, EDIT_MODAL, SlackDrafts, _expiry_label, approval_mode_from_env,
+)
+from bot.workflow import ActorContext, ContentApprovalMode, get_approval_state, revise_pending_content
 
 
 class SlackDraftsTest(unittest.TestCase):
@@ -56,10 +58,10 @@ class SlackDraftsTest(unittest.TestCase):
         }
         self.slash[COMMAND](ack=self.ack, command={**command, **changes}, respond=self.respond)
 
-    def approve(self, user="UAUTHOR", value=None):
+    def approve(self, user="UAUTHOR", value=None, ts="1.2"):
         self.actions["hermes_draft_approve"](
             ack=self.ack, body={"team": {"id": "TDEMO"}, "channel": {"id": "CDRAFT"},
-                                "user": {"id": user}, "message": {"ts": "1.2"}},
+                                "user": {"id": user}, "message": {"ts": ts}},
             action={"action_id": "hermes_draft_approve", "value": value or self.approval_button()},
             respond=self.respond, client=self.client,
         )
@@ -224,3 +226,57 @@ class SlackDraftsTest(unittest.TestCase):
     def test_expiry_label_formats_seoul_noon(self):
         self.assertEqual(_expiry_label("2026-11-27T03:38:12.339579+00:00"),
                          "2026년 11월 27일(금) 오후 12:38 (한국 시간)")
+
+    def test_single_mode_applies_only_to_new_drafts_and_preserves_risk_flags(self):
+        self.model.flagged_claims = ["outcome_guarantee"]
+        self.submit(trigger_id="risk-based")
+        self.assertTrue(self.drafts.process_next(self.client))
+        old_button = self.approval_button()
+        self.approve()
+        self.assertIn("승인 진행: 1/2명", self.client.chat_update.call_args.kwargs["text"])
+
+        single = SlackDrafts(self.mapping, self.db, "CDRAFT", approval_mode=ContentApprovalMode.SINGLE)
+        self.client.chat_postMessage.return_value = {"ts": "1.3"}
+        self.submit(trigger_id="single")
+        self.assertTrue(single.process_next(self.client))
+        request_id = self.approval_button().split(":")[0]
+        state = get_approval_state(request_id, self.db)
+        work = get_work_item(state["work_item_id"], state["version"], self.db)
+        self.assertEqual(work["risk_level"], "high")
+        self.assertEqual(work["output"]["flagged_claims"], ["outcome_guarantee"])
+        self.assertIn("승인 진행: 0/1명", self.client.chat_update.call_args.kwargs["text"])
+        self.approve(ts="1.3")
+        self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
+        self.assertIn("승인 진행: 1/1명", self.client.chat_update.call_args.kwargs["text"])
+
+        self.approve(value=old_button)
+        self.assertEqual(get_approval_state(old_button.split(":")[0], self.db)["status"], "pending")
+        self.assertIn("승인 진행: 1/2명", self.client.chat_update.call_args.kwargs["text"])
+
+    def test_revision_inherits_single_policy_even_when_risk_is_added(self):
+        self.submit()
+        single = SlackDrafts(self.mapping, self.db, "CDRAFT", approval_mode=ContentApprovalMode.SINGLE)
+        self.assertTrue(single.process_next(self.client))
+        original_id = self.approval_button().split(":")[0]
+        revision = revise_pending_content(
+            request_id=original_id, expected_version=1, db_path=self.db,
+            actor=ActorContext.verified_actor("slack:TDEMO:UAUTHOR", ["content_approver"], platform="slack"),
+            revised_output={**self.model.model_dump(), "sensitive_flags": ["legal review"]},
+        )
+        self.assertEqual(revision["policy_key"], "content_single")
+        self.assertEqual(revision["required_roles"], ["content_approver"])
+        self.assertEqual(revision["version"], 2)
+
+    def test_single_mode_requires_staging_with_external_execution_disabled(self):
+        self.assertIs(approval_mode_from_env({}), ContentApprovalMode.RISK_BASED)
+        env = {
+            "SLACK_CONTENT_APPROVAL_MODE": "single", "APP_ENV": "staging",
+            "EXECUTION_ENABLED": "false", "EXECUTION_MODE": "disabled",
+        }
+        self.assertIs(approval_mode_from_env(env), ContentApprovalMode.SINGLE)
+        for invalid in (
+            {"APP_ENV": "production"}, {"EXECUTION_ENABLED": "true"},
+            {"EXECUTION_MODE": "dry_run"}, {"SLACK_CONTENT_APPROVAL_MODE": "unknown"},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(SlackConfigurationError):
+                approval_mode_from_env({**env, **invalid})

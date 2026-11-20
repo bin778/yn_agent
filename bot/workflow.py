@@ -7,6 +7,7 @@ import json
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -69,7 +70,15 @@ def _payload(output: dict | object) -> dict:
     raise TypeError("output must be a dict or Pydantic model")
 
 
-def policy_for(agent_id: str, output_value: dict | object) -> ApprovalPolicy:
+class ContentApprovalMode(str, Enum):
+    RISK_BASED = "risk_based"
+    SINGLE = "single"
+
+
+def policy_for(
+    agent_id: str, output_value: dict | object,
+    *, content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
+) -> ApprovalPolicy:
     output = _payload(output_value)
     if agent_id == "keyword_analyst":
         high = output.get("compliance_risk") == "high"
@@ -81,9 +90,13 @@ def policy_for(agent_id: str, output_value: dict | object) -> ApprovalPolicy:
         )
     if agent_id == "content_editor":
         high = bool(output.get("flagged_claims") or output.get("sensitive_flags"))
+        content_approval_mode = ContentApprovalMode(content_approval_mode)
+        needs_legal = high and content_approval_mode is ContentApprovalMode.RISK_BASED
+        key = "content_legal" if needs_legal else "content_standard"
+        if content_approval_mode is ContentApprovalMode.SINGLE:
+            key = "content_single"
         return ApprovalPolicy(
-            "content_legal" if high else "content_standard",
-            ("content_approver", "legal_compliance") if high else ("content_approver",),
+            key, ("content_approver", "legal_compliance") if needs_legal else ("content_approver",),
             dt.timedelta(days=3 if high else 7), "queue_for_publish", "publish_queue",
             risk_level="high" if high else "standard",
         )
@@ -138,7 +151,8 @@ def create_work_item(*, agent_id: str, output: dict | object, routed_to: str,
                      work_item_id: str | None = None, version: int = 1,
                      parent_version: int | None = None, creation_reason: str | None = None,
                      now: dt.datetime | None = None,
-                     db_path: str | Path | None = None) -> dict:
+                     db_path: str | Path | None = None,
+                     content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED) -> dict:
     with closing(get_conn(db_path)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         return _insert_work_item(
@@ -146,6 +160,7 @@ def create_work_item(*, agent_id: str, output: dict | object, routed_to: str,
             model_version=model_version, input_summary=input_summary, created_by=created_by,
             correlation_id=correlation_id, work_item_id=work_item_id, version=version,
             parent_version=parent_version, creation_reason=creation_reason, now=now,
+            content_approval_mode=content_approval_mode,
         )
 
 
@@ -155,9 +170,10 @@ def _insert_work_item(
     correlation_id: str | None = None, work_item_id: str | None = None, version: int = 1,
     parent_version: int | None = None, creation_reason: str | None = None,
     now: dt.datetime | None = None, editor: ActorContext | None = None,
+    content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
 ) -> dict:
     payload = _payload(output)
-    policy = policy_for(agent_id, payload)
+    policy = policy_for(agent_id, payload, content_approval_mode=content_approval_mode)
     current_time = now or utc_now()
     work_id = work_item_id or str(uuid.uuid4())
     correlation = correlation_id or str(uuid.uuid4())
@@ -529,7 +545,7 @@ def revise_pending_content(*, request_id: str, expected_version: int, actor: Act
     with closing(get_conn(db_path)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         original = conn.execute(
-            """SELECT w.*, a.status AS approval_status, a.expires_at
+            """SELECT w.*, a.status AS approval_status, a.expires_at, a.policy_key
                FROM approval_requests a JOIN work_items w
                  ON w.work_item_id=a.work_item_id AND w.version=a.work_item_version
                WHERE a.request_id=? AND w.agent_id='content_editor'""", (request_id,),
@@ -556,7 +572,11 @@ def revise_pending_content(*, request_id: str, expected_version: int, actor: Act
                actor_type="human", actor_id=actor.actor_id, platform=actor.platform,
                previous_state="pending", new_state="revision_requested", reason=reason,
                correlation_id=original["correlation_id"])
-        policy = policy_for("content_editor", revised_output)
+        approval_mode = (
+            ContentApprovalMode.SINGLE if original["policy_key"] == "content_single"
+            else ContentApprovalMode.RISK_BASED
+        )
+        policy = policy_for("content_editor", revised_output, content_approval_mode=approval_mode)
         return _insert_work_item(
             conn, agent_id="content_editor", output=revised_output,
             routed_to="human_review.queue" if policy.risk_level == "high" else "publish_queue",
@@ -564,6 +584,7 @@ def revise_pending_content(*, request_id: str, expected_version: int, actor: Act
             created_by=actor.actor_id, correlation_id=original["correlation_id"],
             work_item_id=original["work_item_id"], version=expected_version + 1,
             parent_version=expected_version, creation_reason=reason, now=now, editor=actor,
+            content_approval_mode=approval_mode,
         )
 
 
