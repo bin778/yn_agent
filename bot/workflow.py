@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal
@@ -138,6 +139,23 @@ def create_work_item(*, agent_id: str, output: dict | object, routed_to: str,
                      parent_version: int | None = None, creation_reason: str | None = None,
                      now: dt.datetime | None = None,
                      db_path: str | Path | None = None) -> dict:
+    with closing(get_conn(db_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return _insert_work_item(
+            conn, agent_id=agent_id, output=output, routed_to=routed_to,
+            model_version=model_version, input_summary=input_summary, created_by=created_by,
+            correlation_id=correlation_id, work_item_id=work_item_id, version=version,
+            parent_version=parent_version, creation_reason=creation_reason, now=now,
+        )
+
+
+def _insert_work_item(
+    conn, *, agent_id: str, output: dict | object, routed_to: str,
+    model_version: str | None, input_summary: str, created_by: str | None = None,
+    correlation_id: str | None = None, work_item_id: str | None = None, version: int = 1,
+    parent_version: int | None = None, creation_reason: str | None = None,
+    now: dt.datetime | None = None, editor: ActorContext | None = None,
+) -> dict:
     payload = _payload(output)
     policy = policy_for(agent_id, payload)
     current_time = now or utc_now()
@@ -146,53 +164,44 @@ def create_work_item(*, agent_id: str, output: dict | object, routed_to: str,
     creator = created_by or f"agent:{agent_id}"
     request_id = str(uuid.uuid4()) if policy.roles else None
 
-    conn = get_conn(db_path)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        work = {"work_item_id": work_id, "version": version, "agent_id": agent_id,
-                "model_version": model_version}
+    work = {"work_item_id": work_id, "version": version, "agent_id": agent_id,
+            "model_version": model_version}
+    conn.execute(
+        """INSERT INTO work_items (
+               work_item_id, version, agent_id, created_at, created_by, output_json,
+               routed_to, risk_level, status, model_version, input_summary,
+               correlation_id, parent_version
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (work_id, version, agent_id, utc_iso(current_time), creator,
+         json.dumps(payload, ensure_ascii=False), routed_to, policy.risk_level,
+         policy.initial_status, model_version, input_summary, correlation, parent_version),
+    )
+    event_type = "work_item.revision_created" if parent_version else "work_item.created"
+    _audit(conn, event_type=event_type, work=work, actor_type="human" if editor else "agent",
+           actor_id=creator, platform=editor.platform if editor else "internal", previous_state=None,
+           new_state=policy.initial_status, reason=creation_reason, correlation_id=correlation)
+    if request_id:
         conn.execute(
-            """INSERT INTO work_items (
-                   work_item_id, version, agent_id, created_at, created_by, output_json,
-                   routed_to, risk_level, status, model_version, input_summary,
-                   correlation_id, parent_version
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (work_id, version, agent_id, utc_iso(current_time), creator,
-             json.dumps(payload, ensure_ascii=False), routed_to, policy.risk_level,
-             policy.initial_status, model_version, input_summary, correlation, parent_version),
+            """INSERT INTO approval_requests (
+                   request_id, work_item_id, work_item_version, policy_key, status,
+                   created_at, expires_at, requested_by, correlation_id, distinct_approvers
+               ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, 1)""",
+            (request_id, work_id, version, policy.key, utc_iso(current_time),
+             utc_iso(current_time + policy.ttl), creator, correlation),
         )
-        event_type = "work_item.revision_created" if parent_version else "work_item.created"
-        _audit(conn, event_type=event_type, work=work, actor_type="agent",
-               actor_id=creator, platform="internal", previous_state=None,
-               new_state=policy.initial_status, reason=creation_reason, correlation_id=correlation)
-        if request_id:
-            conn.execute(
-                """INSERT INTO approval_requests (
-                       request_id, work_item_id, work_item_version, policy_key, status,
-                       created_at, expires_at, requested_by, correlation_id, distinct_approvers
-                   ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, 1)""",
-                (request_id, work_id, version, policy.key, utc_iso(current_time),
-                 utc_iso(current_time + policy.ttl), creator, correlation),
-            )
-            conn.executemany(
-                "INSERT INTO approval_requirements (request_id, role_key, approvals_required) VALUES (?, ?, 1)",
-                [(request_id, role) for role in policy.roles],
-            )
-            _audit(conn, event_type="approval.requested", work=work, actor_type="system",
-                   actor_id="workflow", platform="internal", previous_state=None,
-                   new_state="pending", reason=policy.key, correlation_id=correlation)
         conn.executemany(
-            """INSERT INTO acknowledgement_requirements
-                   (work_item_id, work_item_version, role_key, acknowledgements_required)
-               VALUES (?, ?, ?, 1)""",
-            [(work_id, version, role) for role in policy.acknowledgement_roles],
+            "INSERT INTO approval_requirements (request_id, role_key, approvals_required) VALUES (?, ?, 1)",
+            [(request_id, role) for role in policy.roles],
         )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        _audit(conn, event_type="approval.requested", work=work, actor_type="system",
+               actor_id="workflow", platform="internal", previous_state=None,
+               new_state="pending", reason=policy.key, correlation_id=correlation)
+    conn.executemany(
+        """INSERT INTO acknowledgement_requirements
+               (work_item_id, work_item_version, role_key, acknowledgements_required)
+           VALUES (?, ?, ?, 1)""",
+        [(work_id, version, role) for role in policy.acknowledgement_roles],
+    )
     return {"work_item_id": work_id, "version": version, "request_id": request_id,
             "status": policy.initial_status, "policy_key": policy.key,
             "required_roles": list(policy.roles),
@@ -508,6 +517,54 @@ def create_revision(*, source_request_id: str, revised_output: dict | object,
         work_item_id=old["work_item_id"], version=old["version"] + 1,
         parent_version=old["version"], creation_reason=reason, db_path=db_path,
     )
+
+
+def revise_pending_content(*, request_id: str, expected_version: int, actor: ActorContext,
+                           revised_output: dict, db_path: str | Path | None = None) -> dict:
+    """Replace a pending content draft and its approval request in one transaction."""
+    _require_actor(actor)
+    if "content_approver" not in actor.roles:
+        raise AuthorizationError("content editor must be a verified content approver")
+    now = utc_now()
+    with closing(get_conn(db_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        original = conn.execute(
+            """SELECT w.*, a.status AS approval_status, a.expires_at
+               FROM approval_requests a JOIN work_items w
+                 ON w.work_item_id=a.work_item_id AND w.version=a.work_item_version
+               WHERE a.request_id=? AND w.agent_id='content_editor'""", (request_id,),
+        ).fetchone()
+        if original is None:
+            raise NotFoundError("content approval request not found")
+        latest = conn.execute(
+            "SELECT MAX(version) FROM work_items WHERE work_item_id=?",
+            (original["work_item_id"],),
+        ).fetchone()[0]
+        if (original["approval_status"] != "pending" or original["version"] != expected_version
+                or latest != expected_version or now >= dt.datetime.fromisoformat(original["expires_at"])):
+            raise StaleActionError("only the latest pending, unexpired content can be edited")
+        conn.execute(
+            "UPDATE approval_requests SET status='revision_requested', resolved_at=? WHERE request_id=?",
+            (utc_iso(now), request_id),
+        )
+        conn.execute(
+            "UPDATE work_items SET status='revision_requested' WHERE work_item_id=? AND version=?",
+            (original["work_item_id"], expected_version),
+        )
+        reason = "Content edited in Slack"
+        _audit(conn, event_type="approval.request.revision_requested", work=dict(original),
+               actor_type="human", actor_id=actor.actor_id, platform=actor.platform,
+               previous_state="pending", new_state="revision_requested", reason=reason,
+               correlation_id=original["correlation_id"])
+        policy = policy_for("content_editor", revised_output)
+        return _insert_work_item(
+            conn, agent_id="content_editor", output=revised_output,
+            routed_to="human_review.queue" if policy.risk_level == "high" else "publish_queue",
+            model_version=original["model_version"], input_summary=original["input_summary"],
+            created_by=actor.actor_id, correlation_id=original["correlation_id"],
+            work_item_id=original["work_item_id"], version=expected_version + 1,
+            parent_version=expected_version, creation_reason=reason, now=now, editor=actor,
+        )
 
 
 def claim_handoffs(handoff_type: str, *, limit: int = 10,

@@ -58,13 +58,15 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     subject = output["title"] if is_content else output["keyword"]
     item_type = "합성 키워드 기반 콘텐츠 초안" if is_content else "합성 키워드"
     card_title = state.get("card_title", f"PHASE 4 개발 검증 · {item_type}")
+    role_label = state.get("role_label", "필요 역할")
+    expires_at = state.get("expiry_label", state["expires_at"])
     text = (
         f"{card_title}\n"
         f"{subject[:300]}\n"
         f"상태: {status}\n"
         f"승인 요청: {state['request_id']} · 버전 {state['version']}\n"
-        f"필요 역할: {state['role']}\n"
-        f"만료: {state['expires_at']}"
+        f"{role_label}: {state['role']}\n"
+        f"만료: {expires_at}"
     )
     sections = [text]
     if is_content:
@@ -78,15 +80,21 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     blocks = [{"type": "section", "text": {"type": "plain_text", "text": section}} for section in sections]
     if state["status"] == "pending":
         actions = state.get("actions", ACTIONS)
-        blocks.append({
-            "type": "actions",
-            "elements": [{
+        value = f"{state['request_id']}:{state['version']}"
+        elements = [{
+            "type": "button",
+            "action_id": action_id,
+            "text": {"type": "plain_text", "text": "콘텐츠 승인" if is_content and decision == "approved" else label},
+            "value": value,
+        } for action_id, (label, decision) in actions.items()]
+        if edit_action_id := state.get("edit_action_id"):
+            elements.append({
                 "type": "button",
-                "action_id": action_id,
-                "text": {"type": "plain_text", "text": "콘텐츠 승인" if is_content and decision == "approved" else label},
-                "value": f"{state['request_id']}:{state['version']}",
-            } for action_id, (label, decision) in actions.items()],
-        })
+                "action_id": edit_action_id,
+                "text": {"type": "plain_text", "text": "초안 수정"},
+                "value": value,
+            })
+        blocks.append({"type": "actions", "elements": elements})
     if len(blocks) > 50:
         raise ValueError("approval card exceeds Slack block limit")
     return escape(text, quote=False), blocks

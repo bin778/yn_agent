@@ -26,6 +26,7 @@ from .config import (
     load_slack_mapping,
 )
 from .drafts import COMMAND as DRAFT_COMMAND
+from .drafts import EDIT_ACTION, EDIT_MODAL
 from .drafts import SlackDrafts
 from .fixtures import SlackTestFixture, load_test_fixture
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
@@ -379,6 +380,14 @@ def register_handlers(
 
     if drafts is not None:
         _register_approval_cards(app, drafts)
+
+        @app.action(EDIT_ACTION)
+        def _draft_edit(ack, body, action, respond, client):
+            drafts.open_edit(ack=ack, body=body, action=action, respond=respond, client=client)
+
+        @app.view(EDIT_MODAL)
+        def _draft_edit_save(ack, body):
+            drafts.submit_edit(ack=ack, body=body)
 
         @app.command(DRAFT_COMMAND)
         def _draft_command(ack, command, respond):

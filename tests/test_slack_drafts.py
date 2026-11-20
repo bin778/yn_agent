@@ -1,14 +1,16 @@
+import copy
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from bot.db import get_conn
+from bot.agents.content_editor import ContentRiskAssessment
+from bot.db import get_conn, get_work_item
 from bot.schemas import ContentEditorOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
 from bot.slack_adapter.config import SlackMapping, SlackSettings
-from bot.slack_adapter.drafts import COMMAND, SlackDrafts
+from bot.slack_adapter.drafts import COMMAND, EDIT_ACTION, EDIT_MODAL, SlackDrafts, _expiry_label
 from bot.workflow import get_approval_state
 
 
@@ -26,10 +28,11 @@ class SlackDraftsTest(unittest.TestCase):
             deps.mapping.queue_channels,
         )
         self.drafts = SlackDrafts(self.mapping, self.db, "CDRAFT")
-        self.slash, self.actions = {}, {}
+        self.slash, self.actions, self.views = {}, {}, {}
         app = Mock()
         app.command.side_effect = lambda key: lambda handler: self.slash.setdefault(key, handler)
         app.action.side_effect = lambda key: lambda handler: self.actions.setdefault(key, handler)
+        app.view.side_effect = lambda key: lambda handler: self.views.setdefault(key, handler)
         register_handlers(app, deps, drafts=self.drafts)
         self.ack = Mock()
         self.respond = Mock()
@@ -53,11 +56,11 @@ class SlackDraftsTest(unittest.TestCase):
         }
         self.slash[COMMAND](ack=self.ack, command={**command, **changes}, respond=self.respond)
 
-    def approve(self, user="UAUTHOR"):
+    def approve(self, user="UAUTHOR", value=None):
         self.actions["hermes_draft_approve"](
             ack=self.ack, body={"team": {"id": "TDEMO"}, "channel": {"id": "CDRAFT"},
                                 "user": {"id": user}, "message": {"ts": "1.2"}},
-            action={"action_id": "hermes_draft_approve", "value": self.approval_button()},
+            action={"action_id": "hermes_draft_approve", "value": value or self.approval_button()},
             respond=self.respond, client=self.client,
         )
 
@@ -106,7 +109,7 @@ class SlackDraftsTest(unittest.TestCase):
         self.approve()
         self.approve()
         self.assertEqual(get_approval_state(request_id, self.db)["status"], "pending")
-        self.assertIn("필요 역할: legal_compliance", self.client.chat_update.call_args.kwargs["text"])
+        self.assertIn("승인 권한: 법무·컴플라이언스 승인자", self.client.chat_update.call_args.kwargs["text"])
         self.approve("ULEGAL")
         decisions = get_approval_state(request_id, self.db)["decisions"]
         self.assertEqual({item["actor_role"] for item in decisions}, {"content_approver", "legal_compliance"})
@@ -129,3 +132,85 @@ class SlackDraftsTest(unittest.TestCase):
         self.client.chat_postMessage.assert_not_called()
         self.assertEqual(self.client.chat_postEphemeral.call_args.kwargs["user"], "UAUTHOR")
         self.assertNotIn("diagnostic", self.client.chat_postEphemeral.call_args.kwargs["text"])
+
+    def edit_view(self, *, user="UAUTHOR"):
+        self.actions[EDIT_ACTION](
+            ack=self.ack,
+            body={"team": {"id": "TDEMO"}, "channel": {"id": "CDRAFT"},
+                  "user": {"id": user}, "message": {"ts": "1.2"}, "trigger_id": "edit"},
+            action={"action_id": EDIT_ACTION, "value": self.approval_button()},
+            respond=self.respond, client=self.client,
+        )
+        view = copy.deepcopy(self.client.views_open.call_args.kwargs["view"])
+        view["state"] = {"values": {
+            block["block_id"]: {"value": {"value": block["element"].get("initial_value")}}
+            for block in view["blocks"]
+        }}
+        return view
+
+    def save_view(self, view, user="UAUTHOR"):
+        self.views[EDIT_MODAL](
+            ack=self.ack, body={"team": {"id": "TDEMO"}, "user": {"id": user}, "view": view},
+        )
+
+    def test_edit_saves_new_version_and_reuses_card_after_retry(self):
+        self.model.body = "가" * 2000
+        self.submit()
+        self.drafts.process_next(self.client)
+        old_button = self.approval_button()
+        old_request = old_button.split(":")[0]
+        self.assertIn("승인 권한: 콘텐츠 승인자", self.client.chat_update.call_args.kwargs["text"])
+        self.assertIn("(한국 시간)", self.client.chat_update.call_args.kwargs["text"])
+        view = self.edit_view()
+        values = view["state"]["values"]
+        self.assertEqual(values["title_1"]["value"]["value"], self.model.title)
+        self.assertIn("body_2", values)
+        values["body_2"]["value"]["value"] = "새 문단"
+        self.save_view(view)
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "update")
+        self.save_view(view)
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+
+        risk = ContentRiskAssessment(flagged_claims=["검토 필요"], sensitive_flags=[])
+        with patch("bot.slack_adapter.drafts.assess_edited_content", return_value=risk) as assess:
+            self.client.chat_update.side_effect = RuntimeError("delivery unavailable")
+            self.assertTrue(self.drafts.process_next(self.client))
+            old = get_approval_state(old_request, self.db)
+            self.assertEqual(old["status"], "revision_requested")
+            self.assertEqual(get_work_item(old["work_item_id"], 1, self.db)["output"]["body"], "가" * 2000)
+            self.assertEqual(get_work_item(old["work_item_id"], 2, self.db)["output"]["body"], "가" * 1400 + "새 문단")
+            with closing(get_conn(self.db)) as conn, conn:
+                conn.execute("UPDATE slack_draft_edits SET retry_at=0")
+            self.client.chat_update.side_effect = None
+            self.assertTrue(SlackDrafts(self.mapping, self.db, "CDRAFT").process_next(self.client))
+            assess.assert_called_once()
+
+        self.assertEqual(self.client.chat_update.call_args.kwargs["ts"], "1.2")
+        self.client.chat_postMessage.assert_called_once()
+        current = self.approval_button().split(":")[0]
+        self.approve(value=old_button)
+        self.assertEqual(get_approval_state(current, self.db)["decisions"], [])
+        self.approve()
+        self.assertEqual(get_approval_state(current, self.db)["status"], "pending")
+        self.approve("ULEGAL")
+        self.assertEqual(get_approval_state(current, self.db)["status"], "approved")
+        with closing(get_conn(self.db)) as conn:
+            self.assertEqual(conn.execute("SELECT work_item_version FROM handoff_jobs").fetchone()[0], 2)
+
+    def test_edit_checks_permission_and_rejects_stale_submission(self):
+        self.submit()
+        self.drafts.process_next(self.client)
+        view = self.edit_view()
+        self.save_view(view, user="ULEGAL")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+        self.save_view(view)
+        self.assertIn("바뀐 내용이 없습니다.", self.ack.call_args.kwargs["errors"]["title_1"])
+        self.approve()
+        view["state"]["values"]["body_1"]["value"]["value"] = "뒤늦은 변경"
+        self.save_view(view)
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+        self.assertFalse(self.drafts.process_next(self.client))
+
+    def test_expiry_label_formats_seoul_noon(self):
+        self.assertEqual(_expiry_label("2026-11-27T03:38:12.339579+00:00"),
+                         "2026년 11월 27일(금) 오후 12:38 (한국 시간)")
