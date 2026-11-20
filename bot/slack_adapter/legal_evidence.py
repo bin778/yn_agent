@@ -127,10 +127,10 @@ def register_legal_evidence_handlers(app, drafts: SlackDrafts) -> None:
             _, state, _ = load_state(body, metadata)
             client.views_open(trigger_id=body["trigger_id"], view=_list_view(metadata, state, 0))
         except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
-            respond(response_type="ephemeral", text=ACCESS_ERROR)
+            respond(response_type="ephemeral", replace_original=False, text=ACCESS_ERROR)
         except Exception as exc:
             LOGGER.warning("Slack legal evidence open failed error_type=%s", type(exc).__name__)
-            respond(response_type="ephemeral", text="근거 검토 창을 열지 못했습니다. 다시 시도해 주세요.")
+            respond(response_type="ephemeral", replace_original=False, text="근거 검토 창을 열지 못했습니다. 다시 시도해 주세요.")
 
     @app.action(NAVIGATE)
     def navigate(ack, body, action, client):

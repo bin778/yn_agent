@@ -92,6 +92,7 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertIn("승인 진행: 1/1명", self.client.chat_update.call_args.kwargs["text"])
         self.respond.assert_called_with(
             response_type="ephemeral",
+            replace_original=False,
             text=("승인 완료 (1/1명) · 발행 검토 대기열에 등록했습니다. "
                   "발행 담당자는 /hermes-publish에서 확인할 수 있습니다."),
         )
@@ -124,7 +125,7 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertIn("승인 권한: 법무·컴플라이언스 승인자", self.client.chat_update.call_args.kwargs["text"])
         self.assertIn("승인 진행: 1/2명", self.client.chat_update.call_args.kwargs["text"])
         self.respond.assert_called_with(
-            response_type="ephemeral", text="승인 진행 1/2명 · 남은 승인 권한: 법무·컴플라이언스 승인자",
+            response_type="ephemeral", replace_original=False, text="승인 진행 1/2명 · 남은 승인 권한: 법무·컴플라이언스 승인자",
         )
         self.approve("ULEGAL")
         self.assertIn("승인 진행: 2/2명", self.client.chat_update.call_args.kwargs["text"])
@@ -326,6 +327,7 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertIn("법률 근거 확인 0/2건", self.client.chat_update.call_args.kwargs["text"])
         self.approve()
         self.assertIn("모든 대상 문장", self.respond.call_args.kwargs["text"])
+        self.assertFalse(self.respond.call_args.kwargs["replace_original"])
 
         first = self.review_view()
         self.save_review(first, source="https://www.law.go.kr.example.com/pretend")

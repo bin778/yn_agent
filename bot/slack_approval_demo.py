@@ -238,7 +238,7 @@ class SlackApprovalCards:
                 )
                 if feedback := updated.get("approval_feedback"):
                     try:
-                        respond(response_type="ephemeral", text=feedback)
+                        respond(response_type="ephemeral", replace_original=False, text=feedback)
                     except Exception as exc:
                         LOGGER.warning("Slack approval confirmation failed error_type=%s", type(exc).__name__)
                 return
@@ -261,15 +261,15 @@ class SlackApprovalCards:
                 }],
             })
         except workflow.LegalEvidenceError as exc:
-            respond(response_type="ephemeral", text=str(exc))
+            respond(response_type="ephemeral", replace_original=False, text=str(exc))
         except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
-            respond(response_type="ephemeral", text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
+            respond(response_type="ephemeral", replace_original=False, text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
         except Exception as exc:
             LOGGER.warning("approval action failed error_type=%s", type(exc).__name__)
             retry = (
                 self._refresh_hint(subcommand, request_id) if subcommand and request_id else ""
             )
-            respond(response_type="ephemeral", text=f"승인 상태를 표시하지 못했습니다.{retry}")
+            respond(response_type="ephemeral", replace_original=False, text=f"승인 상태를 표시하지 못했습니다.{retry}")
 
     def handle_view(self, *, ack, body: dict, client) -> None:
         view = body["view"]
