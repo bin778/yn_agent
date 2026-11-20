@@ -1,0 +1,21 @@
+# 운영 EC2의 /etc/hermes/slack_mapping.yaml에 복사한 뒤 예시 ID를 모두 교체합니다.
+# 운영용 Hermes를 초대한 비공개 채널의 ID를 사용합니다.
+workspace_id: T00000000
+
+allowed_users:
+  U00000001:
+    roles:
+      - keyword_approver
+      - content_approver
+  U00000002:
+    roles:
+      - legal_compliance
+  # 다른 역할은 필요한 사람에게만 부여합니다. 복수 역할 승인에는 서로 다른 계정이 필요합니다.
+
+queue_channels:
+  compliance_review.queue: C00000001
+  human_review.queue: C00000002
+  performance_review.queue: C00000003
+  data_assistant.tracking_status: C00000004
+  # 현재 매핑 로더가 이 키를 요구합니다. 운영 검토 채널과 별도인 비공개 점검 채널에 연결합니다.
+  dev_team.queue: C00000005

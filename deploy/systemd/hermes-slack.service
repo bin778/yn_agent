@@ -1,0 +1,30 @@
+[Unit]
+Description=Hermes Slack Socket Mode
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/lib/hermes
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes/app
+EnvironmentFile=/etc/hermes/hermes.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# 기존 Socket Mode 진입점입니다. 운영 승인 핸들러를 연결하기 전에는 연결 점검에 사용합니다.
+ExecStart=/opt/hermes/venv/bin/python -m bot.slack_app
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGINT
+TimeoutStopSec=30s
+StateDirectory=hermes
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
