@@ -70,6 +70,17 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             UNIQUE (request_id, role_key),
             FOREIGN KEY (request_id) REFERENCES approval_requests(request_id)
         );
+        CREATE TABLE IF NOT EXISTS legal_evidence_reviews (
+            request_id TEXT NOT NULL REFERENCES approval_requests(request_id),
+            claim_index INTEGER NOT NULL CHECK (claim_index >= 0),
+            status TEXT NOT NULL CHECK (status IN ('confirmed', 'needs_revision')),
+            source_url TEXT NOT NULL,
+            source_reference TEXT NOT NULL,
+            note TEXT NOT NULL,
+            reviewed_by TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            PRIMARY KEY (request_id, claim_index)
+        );
         CREATE TABLE IF NOT EXISTS approval_decisions (
             decision_id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL,

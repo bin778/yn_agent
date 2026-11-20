@@ -62,11 +62,13 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     expires_at = state.get("expiry_label", state["expires_at"])
     progress = state.get("approval_progress")
     progress_line = f"승인 진행: {progress}\n" if progress else ""
+    review_action = state.get("legal_review_action_id")
+    review_line = f"{state['legal_review_label']}\n" if review_action else ""
     text = (
         f"{card_title}\n"
         f"{subject[:300]}\n"
         f"상태: {status}\n"
-        f"{progress_line}"
+        f"{progress_line}{review_line}"
         f"승인 요청: {state['request_id']} · 버전 {state['version']}\n"
         f"{role_label}: {state['role']}\n"
         f"만료: {expires_at}"
@@ -98,6 +100,16 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
                 "value": value,
             })
         blocks.append({"type": "actions", "elements": elements})
+    if review_action:
+        button = {
+            "type": "button", "action_id": review_action,
+            "text": {"type": "plain_text", "text": "법률 근거 확인"},
+            "value": f"{state['request_id']}:{state['version']}",
+        }
+        if state["status"] == "pending":
+            elements.append(button)
+        else:
+            blocks.append({"type": "actions", "elements": [button]})
     if len(blocks) > 50:
         raise ValueError("approval card exceeds Slack block limit")
     return escape(text, quote=False), blocks
@@ -248,6 +260,8 @@ class SlackApprovalCards:
                     "element": {"type": "plain_text_input", "action_id": "reason", "multiline": True},
                 }],
             })
+        except workflow.LegalEvidenceError as exc:
+            respond(response_type="ephemeral", text=str(exc))
         except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
             respond(response_type="ephemeral", text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
         except Exception as exc:

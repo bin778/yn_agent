@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Literal
+from urllib.parse import urlsplit
 
 from .db import get_conn, utc_iso, utc_now
 
@@ -29,6 +30,10 @@ class InvalidTransitionError(WorkflowError):
 
 
 class StaleActionError(WorkflowError):
+    pass
+
+
+class LegalEvidenceError(WorkflowError):
     pass
 
 
@@ -89,7 +94,7 @@ def policy_for(
             risk_level="high" if high else "standard",
         )
     if agent_id == "content_editor":
-        high = bool(output.get("flagged_claims") or output.get("sensitive_flags"))
+        high = bool(output.get("flagged_claims") or output.get("sensitive_flags") or legal_claims(output))
         content_approval_mode = ContentApprovalMode(content_approval_mode)
         needs_legal = high and content_approval_mode is ContentApprovalMode.RISK_BASED
         key = "content_legal" if needs_legal else "content_standard"
@@ -257,6 +262,108 @@ def get_approval_state(request_id: str, db_path: str | Path | None = None) -> di
             "decisions": decisions}
 
 
+def legal_claims(output: dict) -> list[str]:
+    return list(dict.fromkeys(claim.strip() for claim in output.get("legal_claims", []) if claim.strip()))
+
+
+def read_legal_reviews(request_id: str, db_path: str | Path | None = None) -> dict[int, dict]:
+    with closing(get_conn(db_path)) as conn:
+        return {
+            row["claim_index"]: dict(row)
+            for row in conn.execute("SELECT * FROM legal_evidence_reviews WHERE request_id=?", (request_id,))
+        }
+
+
+def _official_source(url: str) -> bool:
+    if len(url) > 1800 or any(
+        char.isspace() or not char.isprintable() or char in '\\<>|"'
+        for char in url
+    ):
+        return False
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or ""
+        return (
+            parsed.scheme == "https" and parsed.username is None and parsed.port in {None, 443}
+            and any(host == domain or host.endswith("." + domain)
+                    for domain in ("law.go.kr", "scourt.go.kr", "ccourt.go.kr"))
+            and parsed.path not in {"", "/"}
+        )
+    except ValueError:
+        return False
+
+
+def record_legal_review(
+    *, request_id: str, expected_version: int, claim_index: int, actor: ActorContext,
+    status: str, source_url: str, source_reference: str, note: str, db_path: str | Path | None = None,
+) -> None:
+    _require_actor(actor)
+    source_url, source_reference, note = source_url.strip(), source_reference.strip(), note.strip()
+    if status not in {"confirmed", "needs_revision"} or not note:
+        raise LegalEvidenceError("검토 결과와 확인 내용 또는 수정 이유를 입력해 주세요.")
+    if len(source_reference) > 300 or len(note) > 1200:
+        raise LegalEvidenceError("근거 정보 또는 검토 내용이 너무 깁니다.")
+    if status == "confirmed" and (not source_url or not source_reference):
+        raise LegalEvidenceError("확인 완료에는 공식 원문 URL과 근거 정보가 필요합니다.")
+    if source_url and not _official_source(source_url):
+        raise LegalEvidenceError("국가법령정보센터·법원·헌법재판소의 HTTPS 원문 URL을 입력해 주세요.")
+
+    with closing(get_conn(db_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        work = conn.execute(
+            """SELECT w.*, a.status AS request_status, a.expires_at, a.policy_key
+               FROM approval_requests a JOIN work_items w
+               ON w.work_item_id=a.work_item_id AND w.version=a.work_item_version
+               WHERE a.request_id=? AND w.agent_id='content_editor' AND w.version=?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM work_items newer
+                     WHERE newer.work_item_id=w.work_item_id AND newer.version>w.version
+                 )""",
+            (request_id, expected_version),
+        ).fetchone()
+        if (work is None or work["request_status"] != "pending"
+                or utc_now() >= dt.datetime.fromisoformat(work["expires_at"])):
+            raise LegalEvidenceError("승인 대기 중인 최신 초안에서만 검토를 저장할 수 있습니다.")
+        role = "content_approver" if work["policy_key"] == "content_single" else "legal_compliance"
+        if role not in actor.roles:
+            raise AuthorizationError("missing legal evidence reviewer role")
+        claims = legal_claims(json.loads(work["output_json"]))
+        if not 0 <= claim_index < len(claims):
+            raise LegalEvidenceError("검토 대상 문장을 찾을 수 없습니다.")
+        if conn.execute(
+            "SELECT 1 FROM approval_decisions WHERE request_id=? AND decision='approved'", (request_id,)
+        ).fetchone():
+            raise LegalEvidenceError("승인이 시작된 초안은 새 버전을 만들어 다시 검토해 주세요.")
+
+        current = (status, source_url, source_reference, note, actor.actor_id)
+        previous = conn.execute(
+            """SELECT status, source_url, source_reference, note, reviewed_by
+               FROM legal_evidence_reviews WHERE request_id=? AND claim_index=?""",
+            (request_id, claim_index),
+        ).fetchone()
+        if previous is not None and tuple(previous) == current:
+            return
+        conn.execute(
+            """INSERT INTO legal_evidence_reviews (
+                   request_id, claim_index, status, source_url, source_reference, note, reviewed_by, reviewed_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(request_id, claim_index) DO UPDATE SET
+                   status=excluded.status, source_url=excluded.source_url,
+                   source_reference=excluded.source_reference, note=excluded.note,
+                   reviewed_by=excluded.reviewed_by, reviewed_at=excluded.reviewed_at""",
+            (request_id, claim_index, *current, utc_iso()),
+        )
+        _audit(
+            conn, event_type="legal_evidence.reviewed", work=dict(work), actor_type="human",
+            actor_id=actor.actor_id, platform=actor.platform,
+            previous_state=previous["status"] if previous is not None else None,
+            new_state=status, reason=json.dumps({
+                "claim_index": claim_index, "source_url": source_url,
+                "source_reference": source_reference, "note": note,
+            }, ensure_ascii=False), correlation_id=work["correlation_id"],
+        )
+
+
 def decide(*, request_id: str, expected_version: int, actor: ActorContext,
            acting_role: str, decision: Decision, reason: str | None = None,
            correlation_id: str | None = None, now: dt.datetime | None = None,
@@ -312,6 +419,17 @@ def decide(*, request_id: str, expected_version: int, actor: ActorContext,
         ).fetchone()
         if requirement is None:
             raise AuthorizationError(f"role is not required for this request: {acting_role}")
+
+        if decision == "approved" and work["agent_id"] == "content_editor":
+            claims = legal_claims(json.loads(work["output_json"]))
+            if claims:
+                confirmed = conn.execute(
+                    """SELECT COUNT(*) FROM legal_evidence_reviews
+                       WHERE request_id=? AND claim_index<? AND status='confirmed'""",
+                    (request_id, len(claims)),
+                ).fetchone()[0]
+                if confirmed != len(claims):
+                    raise LegalEvidenceError("법률 근거 검토에서 모든 대상 문장을 확인한 뒤 승인해 주세요.")
 
         correlation = correlation_id or request["correlation_id"]
         conn.execute(

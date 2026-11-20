@@ -23,6 +23,7 @@ from ..workflow import ContentApprovalMode
 from ..slack_approval_demo import CONTENT_COMMAND, SlackApprovalCards, render_card
 from .blocks import seoul_time_label
 from .config import SlackConfigurationError, SlackMapping
+from .legal_evidence import OPEN as LEGAL_EVIDENCE_ACTION
 
 COMMAND = "/hermes-draft"
 LOGGER = logging.getLogger(__name__)
@@ -117,6 +118,9 @@ class SlackDrafts(SlackApprovalCards):
             )
         else:
             approval_feedback = f"승인 진행 {progress} · 남은 승인 권한: {role_names}"
+        claims = workflow.legal_claims(work["output"])
+        reviews = workflow.read_legal_reviews(request_id, self.db_path) if claims else {}
+        confirmed = sum(review["status"] == "confirmed" for review in reviews.values())
         return {
             **state,
             "command": CONTENT_COMMAND,
@@ -130,6 +134,10 @@ class SlackDrafts(SlackApprovalCards):
                 key: value for key, value in self.actions.items() if value[1] != "revision_requested"
             },
             "edit_action_id": EDIT_ACTION,
+            "legal_claims": claims,
+            "legal_reviews": reviews,
+            "legal_review_action_id": LEGAL_EVIDENCE_ACTION if claims else None,
+            "legal_review_label": f"법률 근거 확인 {confirmed}/{len(claims)}건",
             "output": work["output"],
         }
 
@@ -294,7 +302,7 @@ class SlackDrafts(SlackApprovalCards):
                 "request_id": job["job_id"], "version": source["version"], "message_ts": job["message_ts"],
             })
             risk = assess_edited_content(edited)
-            output = {**source["output"], **edited}
+            output = {**source["output"], **edited, "legal_claims": risk.legal_claims}
             for field in ("flagged_claims", "sensitive_flags"):
                 output[field] = list(dict.fromkeys([*output.get(field, []), *getattr(risk, field)]))
             render_card({**source, "output": output})

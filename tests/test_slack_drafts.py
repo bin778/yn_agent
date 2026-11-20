@@ -5,7 +5,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from bot.agents.content_editor import ContentRiskAssessment
+from bot.agents.content_editor import ContentRiskAssessment, SlackContentEditorOutput
 from bot.db import get_conn, get_work_item
 from bot.schemas import ContentEditorOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
@@ -14,7 +14,8 @@ from bot.slack_adapter.config import SlackConfigurationError, SlackMapping, Slac
 from bot.slack_adapter.drafts import (
     COMMAND, EDIT_ACTION, EDIT_MODAL, SlackDrafts, approval_mode_from_env,
 )
-from bot.workflow import ActorContext, ContentApprovalMode, get_approval_state, revise_pending_content
+from bot.slack_adapter.legal_evidence import NAVIGATE, OPEN, SAVE
+from bot.workflow import ActorContext, ContentApprovalMode, get_approval_state, read_legal_reviews, revise_pending_content
 
 
 class SlackDraftsTest(unittest.TestCase):
@@ -27,7 +28,8 @@ class SlackDraftsTest(unittest.TestCase):
         self.mapping = SlackMapping(
             "TDEMO",
             {"UAUTHOR": frozenset({"content_approver", "legal_compliance"}),
-            "ULEGAL": frozenset({"legal_compliance"})},
+            "ULEGAL": frozenset({"legal_compliance"}),
+            "UEDITOR": frozenset({"content_approver"})},
             deps.mapping.queue_channels,
         )
         self.drafts = SlackDrafts(self.mapping, self.db, "CDRAFT")
@@ -283,3 +285,101 @@ class SlackDraftsTest(unittest.TestCase):
         ):
             with self.subTest(invalid=invalid), self.assertRaises(SlackConfigurationError):
                 approval_mode_from_env({**env, **invalid})
+
+    def review_view(self, *, user="UAUTHOR", index=0):
+        identity = {"team": {"id": "TDEMO"}, "user": {"id": user}}
+        self.actions[OPEN](
+            ack=self.ack, client=self.client, respond=self.respond,
+            body={**identity, "channel": {"id": "CDRAFT"}, "message": {"ts": "1.2"}, "trigger_id": "review"},
+            action={"value": self.approval_button()},
+        )
+        view = self.client.views_open.call_args.kwargs["view"]
+        self.actions[NAVIGATE](
+            ack=self.ack, client=self.client, action={"value": f"claim:{index}"},
+            body={**identity, "view": {**view, "id": "VREVIEW", "hash": "latest"}},
+        )
+        return copy.deepcopy(self.client.views_update.call_args.kwargs["view"])
+
+    def save_review(self, view, *, user="UAUTHOR", status="confirmed",
+                    source="https://www.law.go.kr/법령/테스트", reference="테스트 조문과 시행일"):
+        fields = {
+            "result": {"selected_option": {"value": status}},
+            "source_url": {"value": source},
+            "source_reference": {"value": reference},
+            "note": {"value": "테스트 검토 의견"},
+        }
+        self.views[SAVE](ack=self.ack, client=self.client, body={
+            "team": {"id": "TDEMO"}, "user": {"id": user},
+            "view": {**view, "state": {"values": {key: {"value": value} for key, value in fields.items()}}},
+        })
+
+    def test_single_approver_verifies_each_claim_before_approval(self):
+        self.drafts.approval_mode = ContentApprovalMode.SINGLE
+        claims = ["테스트 기한 문장", "테스트 요건 문장"]
+        self.call_model.return_value = SlackContentEditorOutput(
+            **{**self.model.model_dump(), "body": "\n".join(claims)}, legal_claims=claims,
+        )
+        self.submit()
+        self.drafts.process_next(self.client)
+        self.assertEqual(self.call_model.call_args.kwargs["schema_model"], SlackContentEditorOutput)
+        request_id = self.approval_button().split(":")[0]
+        self.assertIn("법률 근거 확인 0/2건", self.client.chat_update.call_args.kwargs["text"])
+        self.approve()
+        self.assertIn("모든 대상 문장", self.respond.call_args.kwargs["text"])
+
+        first = self.review_view()
+        self.save_review(first, source="https://www.law.go.kr.example.com/pretend")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+        self.save_review(first)
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "update")
+        self.assertIn("법률 근거 확인 1/2건", self.client.chat_update.call_args.kwargs["text"])
+        second = self.review_view(index=1)
+        self.save_review(second, status="needs_revision", source="", reference="")
+        self.approve()
+        self.assertEqual(get_approval_state(request_id, self.db)["decisions"], [])
+        with closing(get_conn(self.db)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM handoff_jobs").fetchone()[0], 0)
+
+        self.save_review(second)
+        self.approve()
+        self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
+        self.assertEqual({row["reviewed_by"] for row in read_legal_reviews(request_id, self.db).values()},
+                         {"slack:TDEMO:UAUTHOR"})
+        with closing(get_conn(self.db)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM handoff_jobs").fetchone()[0], 1)
+
+    def test_legal_review_requires_legal_role_in_risk_based_and_resets_on_revision(self):
+        claim = "테스트 법정 기한 문장"
+        self.call_model.return_value = SlackContentEditorOutput(
+            **{**self.model.model_dump(), "body": claim}, legal_claims=[claim],
+        )
+        self.submit()
+        self.drafts.process_next(self.client)
+        old_request = self.approval_button().split(":")[0]
+        self.assertEqual([item["role"] for item in get_approval_state(old_request, self.db)["requirements"]],
+                         ["content_approver", "legal_compliance"])
+
+        # A content approver without the legal role can inspect evidence but cannot save it.
+        viewer = self.review_view(user="UEDITOR")
+        self.assertNotIn("submit", viewer)
+        self.save_review(viewer, user="UEDITOR")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+        reviewer = self.review_view(user="ULEGAL")
+        self.save_review(reviewer, user="ULEGAL")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "update")
+
+        edit = self.edit_view()
+        replacement = "수정된 테스트 법정 기한 문장"
+        edit["state"]["values"]["body_1"]["value"]["value"] = replacement
+        self.save_view(edit)
+        risk = ContentRiskAssessment(flagged_claims=[], sensitive_flags=[], legal_claims=[replacement])
+        with patch("bot.slack_adapter.drafts.assess_edited_content", return_value=risk):
+            self.drafts.process_next(self.client)
+        new_request = self.approval_button().split(":")[0]
+        self.assertNotEqual(old_request, new_request)
+        self.assertEqual(len(read_legal_reviews(old_request, self.db)), 1)
+        self.assertEqual(read_legal_reviews(new_request, self.db), {})
+        self.save_review(reviewer, user="ULEGAL")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+        self.approve()
+        self.assertEqual(get_approval_state(new_request, self.db)["decisions"], [])

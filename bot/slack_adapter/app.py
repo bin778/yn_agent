@@ -29,6 +29,7 @@ from .drafts import COMMAND as DRAFT_COMMAND
 from .drafts import EDIT_ACTION, EDIT_MODAL
 from .drafts import SlackDrafts, approval_mode_from_env
 from .fixtures import SlackTestFixture, load_test_fixture
+from .legal_evidence import register_legal_evidence_handlers
 from .publish import register_publish_handlers
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
 
@@ -381,6 +382,7 @@ def register_handlers(
 
     if drafts is not None:
         _register_approval_cards(app, drafts)
+        register_legal_evidence_handlers(app, drafts)
         register_publish_handlers(app, deps.mapping, drafts.db_path, drafts.channel_id)
 
         @app.action(EDIT_ACTION)
