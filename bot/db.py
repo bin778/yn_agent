@@ -118,6 +118,12 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             UNIQUE (work_item_id, work_item_version, handoff_type),
             FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
         );
+        CREATE TABLE IF NOT EXISTS manual_publications (
+            handoff_id TEXT PRIMARY KEY REFERENCES handoff_jobs(handoff_id),
+            publication_url TEXT NOT NULL,
+            recorded_by TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS audit_events (
             event_id TEXT PRIMARY KEY,
             event_type TEXT NOT NULL,

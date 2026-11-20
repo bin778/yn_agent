@@ -9,9 +9,10 @@ from bot.agents.content_editor import ContentRiskAssessment
 from bot.db import get_conn, get_work_item
 from bot.schemas import ContentEditorOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
+from bot.slack_adapter.blocks import seoul_time_label
 from bot.slack_adapter.config import SlackConfigurationError, SlackMapping, SlackSettings
 from bot.slack_adapter.drafts import (
-    COMMAND, EDIT_ACTION, EDIT_MODAL, SlackDrafts, _expiry_label, approval_mode_from_env,
+    COMMAND, EDIT_ACTION, EDIT_MODAL, SlackDrafts, approval_mode_from_env,
 )
 from bot.workflow import ActorContext, ContentApprovalMode, get_approval_state, revise_pending_content
 
@@ -88,7 +89,9 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertIn("발행 검토 대기열 등록", self.client.chat_update.call_args.kwargs["text"])
         self.assertIn("승인 진행: 1/1명", self.client.chat_update.call_args.kwargs["text"])
         self.respond.assert_called_with(
-            response_type="ephemeral", text="승인 완료 (1/1명) · 발행 검토 대기열에 등록했습니다.",
+            response_type="ephemeral",
+            text=("승인 완료 (1/1명) · 발행 검토 대기열에 등록했습니다. "
+                  "발행 담당자는 /hermes-publish에서 확인할 수 있습니다."),
         )
         with closing(get_conn(self.db)) as conn:
             self.assertEqual(conn.execute("SELECT handoff_type FROM handoff_jobs").fetchone()[0],
@@ -224,7 +227,7 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertFalse(self.drafts.process_next(self.client))
 
     def test_expiry_label_formats_seoul_noon(self):
-        self.assertEqual(_expiry_label("2026-11-27T03:38:12.339579+00:00"),
+        self.assertEqual(seoul_time_label("2026-11-27T03:38:12.339579+00:00"),
                          "2026년 11월 27일(금) 오후 12:38 (한국 시간)")
 
     def test_single_mode_applies_only_to_new_drafts_and_preserves_risk_flags(self):

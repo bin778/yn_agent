@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from .fixtures import SlackTestFixture
 
@@ -16,6 +18,14 @@ STATE_LABELS = {
     "acknowledged": "모의 확인 완료",
     "expired": "만료",
 }
+
+
+def seoul_time_label(timestamp: str) -> str:
+    local = dt.datetime.fromisoformat(timestamp).astimezone(ZoneInfo("Asia/Seoul"))
+    weekday = "월화수목금토일"[local.weekday()]
+    period = "오전" if local.hour < 12 else "오후"
+    return (f"{local.year}년 {local.month}월 {local.day}일({weekday}) "
+            f"{period} {local.hour % 12 or 12}:{local.minute:02d} (한국 시간)")
 
 
 def test_card_text(session: dict, fixture: SlackTestFixture, *, live_gate: bool = False) -> str:

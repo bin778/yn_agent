@@ -14,7 +14,6 @@ from contextlib import closing
 from pathlib import Path
 from threading import Event
 from typing import Mapping
-from zoneinfo import ZoneInfo
 
 from .. import workflow
 from ..agents.content_editor import assess_edited_content, draft_from_topic
@@ -22,6 +21,7 @@ from ..db import get_conn, get_work_item
 from ..execution import ExecutionSettings
 from ..workflow import ContentApprovalMode
 from ..slack_approval_demo import CONTENT_COMMAND, SlackApprovalCards, render_card
+from .blocks import seoul_time_label
 from .config import SlackConfigurationError, SlackMapping
 
 COMMAND = "/hermes-draft"
@@ -31,7 +31,6 @@ EDIT_ACTION = "hermes_draft_edit"
 EDIT_MODAL = "hermes_draft_edit_save"
 EDIT_FIELDS = {"title": "제목", "hook": "도입부", "body": "본문"}
 APPROVAL_LABELS = {"content_approver": "콘텐츠 승인자", "legal_compliance": "법무·컴플라이언스 승인자"}
-SEOUL = ZoneInfo("Asia/Seoul")
 
 
 def approval_mode_from_env(env: Mapping[str, str]) -> ContentApprovalMode:
@@ -51,14 +50,6 @@ def approval_mode_from_env(env: Mapping[str, str]) -> ContentApprovalMode:
                 "EXECUTION_ENABLED=false, and EXECUTION_MODE=disabled"
             )
     return mode
-
-
-def _expiry_label(timestamp: str) -> str:
-    local = dt.datetime.fromisoformat(timestamp).astimezone(SEOUL)
-    weekday = "월화수목금토일"[local.weekday()]
-    period = "오전" if local.hour < 12 else "오후"
-    return (f"{local.year}년 {local.month}월 {local.day}일({weekday}) "
-            f"{period} {local.hour % 12 or 12}:{local.minute:02d} (한국 시간)")
 
 
 def _edit_fields(output: dict):
@@ -120,7 +111,10 @@ class SlackDrafts(SlackApprovalCards):
         progress = f"{approved_count}/{required_count}명"
         role_names = ", ".join(APPROVAL_LABELS.get(role, role) for role in roles)
         if state["status"] == "approved":
-            approval_feedback = f"승인 완료 ({progress}) · 발행 검토 대기열에 등록했습니다."
+            approval_feedback = (
+                f"승인 완료 ({progress}) · 발행 검토 대기열에 등록했습니다. "
+                "발행 담당자는 /hermes-publish에서 확인할 수 있습니다."
+            )
         else:
             approval_feedback = f"승인 진행 {progress} · 남은 승인 권한: {role_names}"
         return {
@@ -130,7 +124,7 @@ class SlackDrafts(SlackApprovalCards):
             "approval_progress": progress,
             "approval_feedback": approval_feedback,
             "role_label": "승인 권한",
-            "expiry_label": _expiry_label(state["expires_at"]),
+            "expiry_label": seoul_time_label(state["expires_at"]),
             "card_title": "Hermes · 콘텐츠 초안",
             "actions": {
                 key: value for key, value in self.actions.items() if value[1] != "revision_requested"

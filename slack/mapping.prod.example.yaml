@@ -10,6 +10,9 @@ allowed_users:
   U00000002:
     roles:
       - legal_compliance
+  U00000003:
+    roles:
+      - content_publisher
   # 다른 역할은 필요한 사람에게만 부여합니다. 복수 역할 승인에는 서로 다른 계정이 필요합니다.
 
 queue_channels:

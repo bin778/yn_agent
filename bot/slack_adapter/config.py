@@ -15,6 +15,7 @@ ROLE_KEYS = frozenset(
     {
         "keyword_approver",
         "content_approver",
+        "content_publisher",
         "performance_approver",
         "data_owner",
         "legal_compliance",

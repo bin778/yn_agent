@@ -10,6 +10,9 @@ features:
       description: 콘텐츠 초안을 요청합니다
       usage_hint: 주제
       should_escape: false
+    - command: /hermes-publish
+      description: 승인된 콘텐츠와 수동 발행 기록을 확인합니다
+      should_escape: false
 oauth_config:
   scopes:
     bot:

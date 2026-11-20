@@ -145,3 +145,16 @@ HERMES_DB_PATH="$HOME/.hermes/hermes-dev.db" \
 요청, 초안, 승인 결과는 `HERMES_DB_PATH`에 기록됩니다. 카드 게시가 실패하면
 워커가 저장된 초안으로 다시 시도합니다. 승인 완료 후 발행 검토 대기열에 등록되며,
 dry-run 검증은 같은 DB에서 카드의 콘텐츠 승인 요청 ID를 지정해 실행할 수 있습니다.
+
+## Slack에서 수동 발행 결과 기록
+
+1. 기존 Hermes 앱의 App Manifest에 `slack/manifest.prod.yaml`의 `/hermes-publish` 명령을 추가합니다.
+2. `/etc/hermes/slack_mapping.yaml`에서 발행 담당자 계정의 `roles`에
+   `content_publisher`를 추가하고 `hermes-slack.service`를 재시작합니다.
+3. `SLACK_DRAFT_CHANNEL_ID`로 설정한 채널에서 `/hermes-publish`를 실행합니다.
+   발행 대기 목록에서 제목, 승인 버전, 승인 시각을 확인하고 **승인본 보기**를 누릅니다.
+4. 승인본을 복사해 CMS에서 발행한 뒤 **실제 발행 URL**을 저장합니다.
+   해당 승인본은 **발행 기록**에 표시됩니다. 다시 발행 기록을 열면 URL, 기록자와 시각을 확인할 수 있습니다.
+
+같은 워크스페이스와 채널에서 승인한 기존 Slack 초안도 조회됩니다.
+저장 시 서버는 해당 승인 버전의 대기 작업을 완료 처리하고 발행 URL과 기록자를 보관합니다.
