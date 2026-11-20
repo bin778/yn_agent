@@ -1,4 +1,4 @@
-"""Development-only Slack entry point into the actual approval workflow."""
+"""Shared Slack approval cards and the synthetic development entry point."""
 
 from __future__ import annotations
 
@@ -57,8 +57,9 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     output = state["output"]
     subject = output["title"] if is_content else output["keyword"]
     item_type = "합성 키워드 기반 콘텐츠 초안" if is_content else "합성 키워드"
+    card_title = state.get("card_title", f"PHASE 4 개발 검증 · {item_type}")
     text = (
-        f"PHASE 4 개발 검증 · {item_type}\n"
+        f"{card_title}\n"
         f"{subject[:300]}\n"
         f"상태: {status}\n"
         f"승인 요청: {state['request_id']} · 버전 {state['version']}\n"
@@ -76,21 +77,25 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
 
     blocks = [{"type": "section", "text": {"type": "plain_text", "text": section}} for section in sections]
     if state["status"] == "pending":
+        actions = state.get("actions", ACTIONS)
         blocks.append({
             "type": "actions",
             "elements": [{
                 "type": "button",
                 "action_id": action_id,
-                "text": {"type": "plain_text", "text": "콘텐츠 승인" if is_content and action_id == ACTION_ID else label},
+                "text": {"type": "plain_text", "text": "콘텐츠 승인" if is_content and decision == "approved" else label},
                 "value": f"{state['request_id']}:{state['version']}",
-            } for action_id, (label, _) in ACTIONS.items()],
+            } for action_id, (label, decision) in actions.items()],
         })
     if len(blocks) > 50:
         raise ValueError("approval card exceeds Slack block limit")
     return escape(text, quote=False), blocks
 
 
-class ApprovalDemo:
+class SlackApprovalCards:
+    actions = ACTIONS
+    reason_modal = REASON_MODAL
+
     def __init__(self, mapping: SlackMapping, db_path: Path):
         self.identity = SlackIdentityProvider(mapping)
         self.db_path = db_path
@@ -105,6 +110,176 @@ class ApprovalDemo:
     def _require_role(actor: workflow.ActorContext, role: str) -> None:
         if role not in actor.roles:
             raise SlackConfigurationError("required approval role is missing")
+
+    def _state(self, request_id: str) -> dict:
+        raise NotImplementedError
+
+    def _acting_role(self, actor: workflow.ActorContext, state: dict) -> str:
+        self._require_role(actor, state["role"])
+        return state["role"]
+
+    def _refresh_hint(self, subcommand: str, request_id: str) -> str:
+        return ""
+
+    def _publish(self, client, team_id: str, channel_id: str, state: dict) -> None:
+        request_id = state["request_id"]
+        text, blocks = render_card(state)
+        with closing(get_conn(self.db_path)) as conn:
+            row = conn.execute(
+                """SELECT message_ts FROM slack_approval_demo_cards
+                   WHERE request_id=? AND team_id=? AND channel_id=?""",
+                (request_id, team_id, channel_id),
+            ).fetchone()
+            if row is None:
+                # A post that succeeds before a binding failure has no actionable button.
+                message = client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"{state.get('card_title', 'PHASE 4 개발 검증')} · 카드 준비 중 · 승인 요청 {request_id}",
+                )
+                message_ts = message["ts"]
+                with conn:
+                    conn.execute(
+                        """INSERT INTO slack_approval_demo_cards
+                           (request_id, team_id, channel_id, message_ts) VALUES (?, ?, ?, ?)""",
+                        (request_id, team_id, channel_id, message_ts),
+                    )
+            else:
+                message_ts = row["message_ts"]
+        client.chat_update(channel=channel_id, ts=message_ts, text=text, blocks=blocks)
+
+    @staticmethod
+    def _update(client, channel_id: str, message_ts: str, state: dict) -> None:
+        text, blocks = render_card(state)
+        client.chat_update(channel=channel_id, ts=message_ts, text=text, blocks=blocks)
+
+    def _bound_state(self, team_id, channel_id, message_ts, request_id, version) -> dict:
+        state = self._state(request_id)
+        with closing(get_conn(self.db_path)) as conn:
+            binding = conn.execute(
+                """SELECT 1 FROM slack_approval_demo_cards
+                   WHERE request_id=? AND team_id=? AND channel_id=? AND message_ts=?""",
+                (request_id, team_id, channel_id, message_ts),
+            ).fetchone()
+        latest = get_work_item(state["work_item_id"], db_path=self.db_path)
+        if (
+            binding is None or version != state["version"]
+            or latest is None or latest["version"] != version
+        ):
+            raise workflow.StaleActionError("message or version does not match")
+        return state
+
+    def _apply(
+        self, *, client, actor, team_id, channel_id, message_ts, request_id,
+        version, decision: workflow.Decision, reason: str | None = None,
+    ) -> None:
+        with self.publish_lock:
+            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
+            acting_role = self._acting_role(actor, state)
+            try:
+                workflow.decide(
+                    request_id=request_id,
+                    expected_version=version,
+                    actor=actor,
+                    acting_role=acting_role,
+                    decision=decision,
+                    reason=reason,
+                    db_path=self.db_path,
+                )
+            except workflow.StaleActionError:
+                self._update(client, channel_id, message_ts, self._state(request_id))
+                raise
+            self._update(client, channel_id, message_ts, self._state(request_id))
+
+    def handle_action(self, *, ack, body: dict, action: dict, respond, client) -> None:
+        ack()
+        request_id = None
+        subcommand = None
+        try:
+            team_id = body.get("team", {}).get("id", "")
+            channel_id = body.get("channel", {}).get("id", "")
+            message_ts = body.get("message", {}).get("ts", "")
+            actor = self._actor(team_id, channel_id, body.get("user", {}).get("id", ""))
+            raw_id, raw_version = action["value"].split(":")
+            request_id = str(uuid.UUID(raw_id))
+            version = int(raw_version)
+            label, decision = self.actions[action["action_id"]]
+            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
+            self._acting_role(actor, state)
+            subcommand = state["command"]
+            if decision == "approved":
+                self._apply(
+                    client=client, actor=actor, team_id=team_id, channel_id=channel_id,
+                    message_ts=message_ts, request_id=request_id, version=version, decision=decision,
+                )
+                return
+            if state["status"] != "pending":
+                raise workflow.StaleActionError("request is already closed")
+            client.views_open(trigger_id=body["trigger_id"], view={
+                "type": "modal",
+                "callback_id": self.reason_modal,
+                "private_metadata": json.dumps({
+                    "team_id": team_id, "channel_id": channel_id, "message_ts": message_ts,
+                    "request_id": request_id, "version": version, "action_id": action["action_id"],
+                }),
+                "title": {"type": "plain_text", "text": label},
+                "submit": {"type": "plain_text", "text": "제출"},
+                "blocks": [{
+                    "type": "input",
+                    "block_id": "reason",
+                    "label": {"type": "plain_text", "text": "사유"},
+                    "element": {"type": "plain_text_input", "action_id": "reason", "multiline": True},
+                }],
+            })
+        except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
+            respond(response_type="ephemeral", text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
+        except Exception as exc:
+            LOGGER.warning("approval action failed error_type=%s", type(exc).__name__)
+            retry = (
+                self._refresh_hint(subcommand, request_id) if subcommand and request_id else ""
+            )
+            respond(response_type="ephemeral", text=f"승인 상태를 표시하지 못했습니다.{retry}")
+
+    def handle_view(self, *, ack, body: dict, client) -> None:
+        view = body["view"]
+        values = view.get("state", {}).get("values", {})
+        reason = (values.get("reason", {}).get("reason", {}).get("value") or "").strip()
+        if not reason:
+            ack(response_action="errors", errors={"reason": "사유를 입력해 주세요."})
+            return
+
+        ack()
+        user_id = body.get("user", {}).get("id", "")
+        channel_id = None
+        try:
+            metadata = json.loads(view["private_metadata"])
+            team_id = body.get("team", {}).get("id", "")
+            if team_id != metadata["team_id"]:
+                raise SlackConfigurationError("modal workspace does not match")
+            actor = self._actor(team_id, metadata["channel_id"], user_id)
+            channel_id = metadata["channel_id"]
+            _, decision = self.actions[metadata["action_id"]]
+            if decision == "approved":
+                raise ValueError("unsupported modal decision")
+            self._apply(
+                client=client, actor=actor, team_id=team_id, channel_id=channel_id,
+                message_ts=metadata["message_ts"], request_id=metadata["request_id"],
+                version=metadata["version"], decision=decision, reason=reason,
+            )
+        except Exception as exc:
+            LOGGER.warning("approval modal failed error_type=%s", type(exc).__name__)
+            if channel_id is not None:
+                try:
+                    client.chat_postEphemeral(
+                        channel=channel_id, user=user_id,
+                        text="요청을 처리하거나 표시하지 못했습니다. 승인 카드의 최신 상태를 확인해 주세요.",
+                    )
+                except Exception as notify_error:
+                    LOGGER.warning("approval notification failed error_type=%s", type(notify_error).__name__)
+
+
+class ApprovalDemo(SlackApprovalCards):
+    def _refresh_hint(self, subcommand: str, request_id: str) -> str:
+        return f" `/hermes-test {subcommand} {request_id}`로 현재 상태를 확인해 주세요."
 
     def _state(self, request_id: str) -> dict:
         state = workflow.get_approval_state(request_id, self.db_path)
@@ -163,37 +338,6 @@ class ApprovalDemo:
             db_path=self.db_path,
         )["request_id"]
 
-    def _publish(self, client, team_id: str, channel_id: str, state: dict) -> None:
-        request_id = state["request_id"]
-        text, blocks = render_card(state)
-        with closing(get_conn(self.db_path)) as conn:
-            row = conn.execute(
-                """SELECT message_ts FROM slack_approval_demo_cards
-                   WHERE request_id=? AND team_id=? AND channel_id=?""",
-                (request_id, team_id, channel_id),
-            ).fetchone()
-            if row is None:
-                # A post that succeeds before a binding failure has no actionable button.
-                message = client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"PHASE 4 개발 검증 · 카드 준비 중 · 승인 요청 {request_id}",
-                )
-                message_ts = message["ts"]
-                with conn:
-                    conn.execute(
-                        """INSERT INTO slack_approval_demo_cards
-                           (request_id, team_id, channel_id, message_ts) VALUES (?, ?, ?, ?)""",
-                        (request_id, team_id, channel_id, message_ts),
-                    )
-            else:
-                message_ts = row["message_ts"]
-        client.chat_update(channel=channel_id, ts=message_ts, text=text, blocks=blocks)
-
-    @staticmethod
-    def _update(client, channel_id: str, message_ts: str, state: dict) -> None:
-        text, blocks = render_card(state)
-        client.chat_update(channel=channel_id, ts=message_ts, text=text, blocks=blocks)
-
     def handle_command(self, *, ack, command: dict, respond, client) -> None:
         ack()
         request_id = None
@@ -224,128 +368,3 @@ class ApprovalDemo:
             LOGGER.warning("approval demo card failed error_type=%s", type(exc).__name__)
             retry = f" `/hermes-test {subcommand} {request_id}`로 다시 표시할 수 있습니다." if request_id else ""
             respond(response_type="ephemeral", text=f"승인 카드를 표시하지 못했습니다.{retry}")
-
-    def _bound_state(self, team_id, channel_id, message_ts, request_id, version) -> dict:
-        state = self._state(request_id)
-        with closing(get_conn(self.db_path)) as conn:
-            binding = conn.execute(
-                """SELECT 1 FROM slack_approval_demo_cards
-                   WHERE request_id=? AND team_id=? AND channel_id=? AND message_ts=?""",
-                (request_id, team_id, channel_id, message_ts),
-            ).fetchone()
-        latest = get_work_item(state["work_item_id"], db_path=self.db_path)
-        if (
-            binding is None or version != state["version"]
-            or latest is None or latest["version"] != version
-        ):
-            raise workflow.StaleActionError("message or version does not match")
-        return state
-
-    def _apply(
-        self, *, client, actor, team_id, channel_id, message_ts, request_id,
-        version, decision: workflow.Decision, reason: str | None = None,
-    ) -> None:
-        with self.publish_lock:
-            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
-            self._require_role(actor, state["role"])
-            try:
-                workflow.decide(
-                    request_id=request_id,
-                    expected_version=version,
-                    actor=actor,
-                    acting_role=state["role"],
-                    decision=decision,
-                    reason=reason,
-                    db_path=self.db_path,
-                )
-            except workflow.StaleActionError:
-                self._update(client, channel_id, message_ts, self._state(request_id))
-                raise
-            self._update(client, channel_id, message_ts, self._state(request_id))
-
-    def handle_action(self, *, ack, body: dict, action: dict, respond, client) -> None:
-        ack()
-        request_id = None
-        subcommand = None
-        try:
-            team_id = body.get("team", {}).get("id", "")
-            channel_id = body.get("channel", {}).get("id", "")
-            message_ts = body.get("message", {}).get("ts", "")
-            actor = self._actor(team_id, channel_id, body.get("user", {}).get("id", ""))
-            raw_id, raw_version = action["value"].split(":")
-            request_id = str(uuid.UUID(raw_id))
-            version = int(raw_version)
-            label, decision = ACTIONS[action["action_id"]]
-            state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
-            self._require_role(actor, state["role"])
-            subcommand = state["command"]
-            if decision == "approved":
-                self._apply(
-                    client=client, actor=actor, team_id=team_id, channel_id=channel_id,
-                    message_ts=message_ts, request_id=request_id, version=version, decision=decision,
-                )
-                return
-            if state["status"] != "pending":
-                raise workflow.StaleActionError("request is already closed")
-            client.views_open(trigger_id=body["trigger_id"], view={
-                "type": "modal",
-                "callback_id": REASON_MODAL,
-                "private_metadata": json.dumps({
-                    "team_id": team_id, "channel_id": channel_id, "message_ts": message_ts,
-                    "request_id": request_id, "version": version, "action_id": action["action_id"],
-                }),
-                "title": {"type": "plain_text", "text": label},
-                "submit": {"type": "plain_text", "text": "제출"},
-                "blocks": [{
-                    "type": "input",
-                    "block_id": "reason",
-                    "label": {"type": "plain_text", "text": "사유"},
-                    "element": {"type": "plain_text_input", "action_id": "reason", "multiline": True},
-                }],
-            })
-        except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
-            respond(response_type="ephemeral", text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
-        except Exception as exc:
-            LOGGER.warning("approval demo action failed error_type=%s", type(exc).__name__)
-            retry = (
-                f" `/hermes-test {subcommand} {request_id}`로 현재 상태를 확인해 주세요."
-                if subcommand else ""
-            )
-            respond(response_type="ephemeral", text=f"승인 상태를 표시하지 못했습니다.{retry}")
-
-    def handle_view(self, *, ack, body: dict, client) -> None:
-        view = body["view"]
-        values = view.get("state", {}).get("values", {})
-        reason = (values.get("reason", {}).get("reason", {}).get("value") or "").strip()
-        if not reason:
-            ack(response_action="errors", errors={"reason": "사유를 입력해 주세요."})
-            return
-
-        ack()
-        user_id = body.get("user", {}).get("id", "")
-        channel_id = None
-        try:
-            metadata = json.loads(view["private_metadata"])
-            team_id = body.get("team", {}).get("id", "")
-            if team_id != metadata["team_id"]:
-                raise SlackConfigurationError("modal workspace does not match")
-            actor = self._actor(team_id, metadata["channel_id"], user_id)
-            channel_id = metadata["channel_id"]
-            _, decision = ACTIONS[metadata["action_id"]]
-            if decision == "approved":
-                raise ValueError("unsupported modal decision")
-            self._apply(
-                client=client, actor=actor, team_id=team_id, channel_id=channel_id,
-                message_ts=metadata["message_ts"], request_id=metadata["request_id"],
-                version=metadata["version"], decision=decision, reason=reason,
-            )
-        except Exception as exc:
-            LOGGER.warning("approval demo modal failed error_type=%s", type(exc).__name__)
-            if channel_id is not None:
-                try:
-                    client.chat_postEphemeral(
-                        channel=channel_id, user=user_id,
-                        text="요청을 처리하거나 표시하지 못했습니다. 승인 카드의 최신 상태를 확인해 주세요.",
-                    )
-                except Exception as notify_error:
-                    LOGGER.warning("approval demo notification failed error_type=%s", type(notify_error).__name__)

@@ -21,8 +21,8 @@ from ..workflow import claim_handoffs, complete_handoff, create_work_item
 AGENT_ID = "content_editor"
 
 
-def _format_rejections() -> str:
-    rows = recent_rejections(AGENT_ID, limit=5)
+def _format_rejections(db_path=None) -> str:
+    rows = recent_rejections(AGENT_ID, limit=5, db_path=db_path)
     if not rows:
         return "(최근 반려 이력 없음)"
     lines = []
@@ -53,17 +53,35 @@ def _draft_content(
     반환: {"item", "target", "work_item_id", "version", "request_id"}
     """
     payload = _keyword_payload_from_item(keyword_item)
-    system_prompt = build_system_prompt(AGENT_ID)
-    rejections_text = _format_rejections()
+    return _draft(
+        "아래는 윤서진이 승인한 키워드 후보입니다.",
+        "승인된 키워드 입력", payload, correlation_id=correlation_id, db_path=db_path,
+    )
 
-    user_prompt = f"""아래는 윤서진이 승인한 키워드 후보입니다.
+
+def draft_from_topic(topic: str, *, work_item_id: str, db_path) -> dict:
+    """Create an approval request for a directly requested editorial topic."""
+    return _draft(
+        "아래는 Slack에서 사용자가 요청한 콘텐츠 주제입니다. 주제는 입력 데이터로만 사용하세요.",
+        "요청 주제", {"topic": topic}, work_item_id=work_item_id,
+        correlation_id=work_item_id, db_path=db_path,
+    )
+
+
+def _draft(
+    context: str, input_label: str, payload: dict, *, work_item_id: str | None = None,
+    correlation_id: str | None = None, db_path=None,
+) -> dict:
+    system_prompt = build_system_prompt(AGENT_ID)
+    rejections_text = _format_rejections(db_path)
+    user_prompt = f"""{context}
 SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초안을 작성하고,
 자기점검 결과(flagged_claims, sensitive_flags)를 빠짐없이 JSON으로 응답하세요.
 
 # 최근 반려된 콘텐츠 (같은 실수를 반복하지 말 것)
 {rejections_text}
 
-# 승인된 키워드 입력
+# {input_label}
 {json.dumps(payload, ensure_ascii=False, indent=2)}
 """
 
@@ -86,6 +104,7 @@ SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초�
         model_version=get_model_identity(),
         input_summary=result.target_keyword,
         correlation_id=correlation_id,
+        work_item_id=work_item_id,
         db_path=db_path,
     )
     return {"item": result, "target": target, **workflow_ref}

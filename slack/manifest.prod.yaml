@@ -5,10 +5,16 @@ features:
   bot_user:
     display_name: Hermes
     always_online: false
+  slash_commands:
+    - command: /hermes-draft
+      description: 콘텐츠 초안을 요청합니다
+      usage_hint: 주제
+      should_escape: false
 oauth_config:
   scopes:
     bot:
       - chat:write
+      - commands
 settings:
   interactivity:
     is_enabled: true

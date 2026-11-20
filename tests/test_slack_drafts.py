@@ -1,0 +1,131 @@
+import tempfile
+import unittest
+from contextlib import closing
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from bot.db import get_conn
+from bot.schemas import ContentEditorOutput
+from bot.slack_adapter.app import build_dependencies, register_handlers
+from bot.slack_adapter.config import SlackMapping, SlackSettings
+from bot.slack_adapter.drafts import COMMAND, SlackDrafts
+from bot.workflow import get_approval_state
+
+
+class SlackDraftsTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.db = Path(directory.name) / "hermes.db"
+        example_mapping = Path(__file__).resolve().parents[1] / "slack" / "mapping.prod.example.yaml"
+        deps = build_dependencies(SlackSettings("", "", example_mapping), db_path=self.db)
+        self.mapping = SlackMapping(
+            "TDEMO",
+            {"UAUTHOR": frozenset({"content_approver", "legal_compliance"}),
+            "ULEGAL": frozenset({"legal_compliance"})},
+            deps.mapping.queue_channels,
+        )
+        self.drafts = SlackDrafts(self.mapping, self.db, "CDRAFT")
+        self.slash, self.actions = {}, {}
+        app = Mock()
+        app.command.side_effect = lambda key: lambda handler: self.slash.setdefault(key, handler)
+        app.action.side_effect = lambda key: lambda handler: self.actions.setdefault(key, handler)
+        register_handlers(app, deps, drafts=self.drafts)
+        self.ack = Mock()
+        self.respond = Mock()
+        self.client = Mock()
+        self.client.chat_postMessage.return_value = {"ts": "1.2"}
+        self.model = ContentEditorOutput(
+            target_keyword="상담 준비", title="상담 전 준비하기", hook="질문을 정리합니다.",
+            body="상담 일정과 필요한 자료를 확인합니다.", reason="일반 정보",
+        )
+        patcher = patch("bot.agents.content_editor.call_structured", return_value=self.model)
+        self.call_model = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch("bot.agents.content_editor.get_model_identity", return_value="mock-model")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def submit(self, **changes):
+        command = {
+            "team_id": "TDEMO", "channel_id": "CDRAFT", "user_id": "UAUTHOR",
+            "trigger_id": "delivery", "text": "상담 준비",
+        }
+        self.slash[COMMAND](ack=self.ack, command={**command, **changes}, respond=self.respond)
+
+    def approve(self, user="UAUTHOR"):
+        self.actions["hermes_draft_approve"](
+            ack=self.ack, body={"team": {"id": "TDEMO"}, "channel": {"id": "CDRAFT"},
+                                "user": {"id": user}, "message": {"ts": "1.2"}},
+            action={"action_id": "hermes_draft_approve", "value": self.approval_button()},
+            respond=self.respond, client=self.client,
+        )
+
+    def approval_button(self):
+        return self.client.chat_update.call_args.kwargs["blocks"][-1]["elements"][0]["value"]
+
+    def test_command_worker_and_real_approval_engine(self):
+        self.submit()
+        self.submit()
+        self.ack.assert_called_with()
+        self.call_model.assert_not_called()
+        self.assertTrue(self.drafts.process_next(self.client))
+        self.assertFalse(self.drafts.process_next(self.client))
+        self.call_model.assert_called_once()
+        self.assertIn("상담 준비", self.call_model.call_args.kwargs["user_prompt"])
+        self.assertEqual(self.client.chat_postMessage.call_args.kwargs["channel"], "CDRAFT")
+        self.assertIn("상담 전 준비하기", self.client.chat_update.call_args.kwargs["text"])
+        self.client.chat_postMessage.assert_called_once()
+        request_id = self.approval_button().split(":")[0]
+        self.approve()
+        self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
+        self.assertIn("발행 검토 대기열 등록", self.client.chat_update.call_args.kwargs["text"])
+        with closing(get_conn(self.db)) as conn:
+            self.assertEqual(conn.execute("SELECT handoff_type FROM handoff_jobs").fetchone()[0],
+                             "queue_for_publish")
+
+    def test_publish_retry_loads_saved_draft_and_updates_same_message(self):
+        self.submit()
+        self.client.chat_update.side_effect = RuntimeError("temporary Slack problem")
+        self.assertTrue(self.drafts.process_next(self.client))
+        self.assertFalse(self.drafts.process_next(self.client))
+        with closing(get_conn(self.db)) as conn, conn:
+            conn.execute("UPDATE slack_draft_jobs SET retry_at=0")
+        restarted = SlackDrafts(self.mapping, self.db, "CDRAFT")
+        self.client.chat_update.side_effect = None
+        self.assertTrue(restarted.process_next(self.client))
+        self.call_model.assert_called_once()
+        self.client.chat_postMessage.assert_called_once()
+        self.assertEqual(self.client.chat_update.call_args.kwargs["ts"], "1.2")
+
+    def test_flagged_draft_requires_distinct_content_and_legal_approvals(self):
+        self.model.flagged_claims = ["outcome_guarantee"]
+        self.submit()
+        self.drafts.process_next(self.client)
+        request_id = self.approval_button().split(":")[0]
+        self.approve()
+        self.approve()
+        self.assertEqual(get_approval_state(request_id, self.db)["status"], "pending")
+        self.assertIn("필요 역할: legal_compliance", self.client.chat_update.call_args.kwargs["text"])
+        self.approve("ULEGAL")
+        decisions = get_approval_state(request_id, self.db)["decisions"]
+        self.assertEqual({item["actor_role"] for item in decisions}, {"content_approver", "legal_compliance"})
+        self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
+
+    def test_denies_wrong_workspace_channel_or_role(self):
+        for fields in (
+            {"team_id": "TOTHER"}, {"channel_id": "COTHER"}, {"user_id": "ULEGAL"},
+            {"user_id": "UUNKNOWN"}, {"text": "  "},
+        ):
+            self.submit(**fields)
+        self.assertFalse(self.drafts.process_next(self.client))
+        self.call_model.assert_not_called()
+
+    def test_generation_failure_reports_to_requester_without_publishing(self):
+        self.submit()
+        self.call_model.side_effect = RuntimeError("sensitive provider diagnostic")
+        self.assertTrue(self.drafts.process_next(self.client))
+        self.assertFalse(self.drafts.process_next(self.client))
+        self.client.chat_postMessage.assert_not_called()
+        self.assertEqual(self.client.chat_postEphemeral.call_args.kwargs["user"], "UAUTHOR")
+        self.assertNotIn("diagnostic", self.client.chat_postEphemeral.call_args.kwargs["text"])

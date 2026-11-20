@@ -1,22 +1,22 @@
-"""Slack Bolt handlers and Socket Mode entrypoint for the Phase 3 test UI."""
+"""Slack Bolt handlers and Socket Mode entrypoint."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, Callable
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from ..config import DB_PATH
-from ..slack_approval_demo import ACTIONS as DEMO_ACTIONS
 from ..slack_approval_demo import COMMANDS as DEMO_COMMANDS
-from ..slack_approval_demo import REASON_MODAL as DEMO_REASON_MODAL
-from ..slack_approval_demo import ApprovalDemo
+from ..slack_approval_demo import ApprovalDemo, SlackApprovalCards
 from .blocks import render_action_modal, render_test_card, test_card_text
 from .config import (
     SlackConfigurationError,
@@ -25,6 +25,8 @@ from .config import (
     SlackSettings,
     load_slack_mapping,
 )
+from .drafts import COMMAND as DRAFT_COMMAND
+from .drafts import SlackDrafts
 from .fixtures import SlackTestFixture, load_test_fixture
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
 
@@ -348,8 +350,21 @@ def handle_view_submission(
                 )
 
 
+def _register_approval_cards(app: App, cards: SlackApprovalCards) -> None:
+    def on_action(ack, body, action, respond, client):
+        cards.handle_action(ack=ack, body=body, action=action, respond=respond, client=client)
+
+    for action_id in cards.actions:
+        app.action(action_id)(on_action)
+
+    @app.view(cards.reason_modal)
+    def on_view(ack, body, client):
+        cards.handle_view(ack=ack, body=body, client=client)
+
+
 def register_handlers(
-    app: App, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None
+    app: App, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None,
+    *, drafts: SlackDrafts | None = None,
 ) -> None:
     @app.command(COMMAND)
     def _command(ack, command, respond, client):
@@ -360,17 +375,14 @@ def register_handlers(
         handle_command(ack=ack, command=command, respond=respond, client=client, deps=deps)
 
     if approval_demo is not None:
-        def _demo_action(ack, body, action, respond, client):
-            approval_demo.handle_action(
-                ack=ack, body=body, action=action, respond=respond, client=client
-            )
+        _register_approval_cards(app, approval_demo)
 
-        for action_id in DEMO_ACTIONS:
-            app.action(action_id)(_demo_action)
+    if drafts is not None:
+        _register_approval_cards(app, drafts)
 
-        @app.view(DEMO_REASON_MODAL)
-        def _demo_view(ack, body, client):
-            approval_demo.handle_view(ack=ack, body=body, client=client)
+        @app.command(DRAFT_COMMAND)
+        def _draft_command(ack, command, respond):
+            drafts.handle_command(ack=ack, command=command, respond=respond)
 
     def _action(ack, body, action, respond, client):
         handle_action(
@@ -407,12 +419,13 @@ def verify_slack_workspace(client: Any, mapping: SlackMapping) -> dict:
 
 
 def create_app(
-    settings: SlackSettings, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None
+    settings: SlackSettings, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None,
+    *, drafts: SlackDrafts | None = None,
 ) -> App:
     settings.validate_runtime()
     app = App(token=settings.bot_token)
     verify_slack_workspace(app.client, deps.mapping)
-    register_handlers(app, deps, approval_demo)
+    register_handlers(app, deps, approval_demo, drafts=drafts)
     return app
 
 
@@ -435,12 +448,21 @@ def main() -> int:
         ):
             parser.error("--approval-demo-db must use a separate file from HERMES_DB_PATH")
         approval_demo = ApprovalDemo(deps.mapping, demo_path)
-    app = create_app(settings, deps, approval_demo)
-    LOGGER.info("Phase 3 Slack Socket Mode starting workspace=%s", deps.mapping.workspace_id)
+    draft_channel = os.environ.get("SLACK_DRAFT_CHANNEL_ID", "").strip()
+    drafts = SlackDrafts(deps.mapping, DB_PATH, draft_channel) if draft_channel else None
+    app = create_app(settings, deps, approval_demo, drafts=drafts)
+    handler = SocketModeHandler(app, settings.app_token)
+    stop = Event()
+    if drafts is not None:
+        Thread(target=drafts.run, args=(app.client, stop), name="slack-drafts", daemon=True).start()
+    LOGGER.info("Slack Socket Mode starting workspace=%s draft_requests=%s",
+                deps.mapping.workspace_id, drafts is not None)
     try:
-        SocketModeHandler(app, settings.app_token).start()
+        handler.start()
     except KeyboardInterrupt:
-        LOGGER.info("Phase 3 Slack Socket Mode stopped")
+        LOGGER.info("Slack Socket Mode stopped")
+    finally:
+        stop.set()
     return 0
 
 

@@ -115,3 +115,22 @@ HERMES_DB_PATH="$HOME/.hermes/hermes-dev.db" \
 요청을 할 수 있습니다. 같은 명령은 기존 카드의 상태를 다시 표시합니다. 승인하면
 `queue_for_publish`가 개발 DB에 한 건 등록됩니다. 일반 합성 초안을 대상으로 하며,
 다중 역할 승인과 발행 실행은 별도 단계입니다.
+
+### Hermes에서 콘텐츠 초안 요청
+
+1. 운영용 Hermes 앱에 `slack/manifest.prod.yaml`을 적용합니다. 추가된 `commands`
+   권한을 승인하도록 Yeoon 워크스페이스에 앱을 다시 설치합니다.
+2. EC2 서비스 환경 파일에서 `SLACK_DRAFT_CHANNEL_ID`를 Hermes가 참여한 비공개
+   채널의 ID로 지정합니다. 이 채널에서만 요청과 승인 버튼을 처리합니다.
+3. `hermes` 계정에서 설정된 `CODEX_COMMAND`를 실행할 수 있고, 같은 계정의
+   `CODEX_HOME`에 CLI 인증이 준비되어 있어야 합니다. `hermes-slack`을 재시작한
+   뒤 로그에서 `draft_requests=True`와 Socket Mode 연결을 확인합니다.
+4. 채널에서 `/hermes-draft 첫 상담 전 준비할 질문`을 실행합니다.
+   `keyword_approver`, `content_approver`, `workflow_admin` 역할 중 하나가 필요합니다.
+   요청자가 접수 안내를 받은 뒤 같은 채널에 콘텐츠 승인 카드가 올라옵니다.
+   일반 초안은 `content_approver`가 승인하고, 위험 플래그가 있는 초안은
+   별도 계정의 `legal_compliance` 승인도 필요합니다.
+
+요청, 초안, 승인 결과는 `HERMES_DB_PATH`에 기록됩니다. 카드 게시가 실패하면
+워커가 저장된 초안으로 다시 시도합니다. 승인 완료 후 발행 검토 대기열에 등록되며,
+dry-run 검증은 같은 DB에서 카드의 콘텐츠 승인 요청 ID를 지정해 실행할 수 있습니다.
