@@ -295,16 +295,17 @@ def _official_source(url: str) -> bool:
 
 def record_legal_review(
     *, request_id: str, expected_version: int, claim_index: int, actor: ActorContext,
-    status: str, source_url: str, source_reference: str, note: str, db_path: str | Path | None = None,
+    status: str | None, source_url: str, source_reference: str, note: str, db_path: str | Path | None = None,
 ) -> None:
     _require_actor(actor)
     source_url, source_reference, note = source_url.strip(), source_reference.strip(), note.strip()
-    if status not in {"confirmed", "needs_revision"} or not note:
-        raise LegalEvidenceError("검토 결과와 확인 내용 또는 수정 이유를 입력해 주세요.")
+    if status is not None and status not in {"confirmed", "needs_revision"}:
+        raise LegalEvidenceError("검토 결과를 다시 선택해 주세요.")
+    if status is None and not (source_url or source_reference or note):
+        raise LegalEvidenceError("검토 결과 또는 근거를 하나 이상 입력해 주세요.")
     if len(source_reference) > 300 or len(note) > 1200:
         raise LegalEvidenceError("근거 정보 또는 검토 내용이 너무 깁니다.")
-    if status == "confirmed" and (not source_url or not source_reference):
-        raise LegalEvidenceError("확인 완료에는 공식 원문 URL과 근거 정보가 필요합니다.")
+    status = status or "noted"
     if source_url and not _official_source(source_url):
         raise LegalEvidenceError("국가법령정보센터·법원·헌법재판소의 HTTPS 원문 URL을 입력해 주세요.")
 
@@ -419,17 +420,6 @@ def decide(*, request_id: str, expected_version: int, actor: ActorContext,
         ).fetchone()
         if requirement is None:
             raise AuthorizationError(f"role is not required for this request: {acting_role}")
-
-        if decision == "approved" and work["agent_id"] == "content_editor":
-            claims = legal_claims(json.loads(work["output_json"]))
-            if claims:
-                confirmed = conn.execute(
-                    """SELECT COUNT(*) FROM legal_evidence_reviews
-                       WHERE request_id=? AND claim_index<? AND status='confirmed'""",
-                    (request_id, len(claims)),
-                ).fetchone()[0]
-                if confirmed != len(claims):
-                    raise LegalEvidenceError("법률 근거 검토에서 모든 대상 문장을 확인한 뒤 승인해 주세요.")
 
         correlation = correlation_id or request["correlation_id"]
         conn.execute(

@@ -18,7 +18,8 @@ OPEN = "hermes_legal_evidence"
 NAVIGATE = "hermes_legal_evidence_navigate"
 SAVE = "hermes_legal_evidence_save"
 PAGE_SIZE = 8
-STATUS = {"confirmed": "확인 완료", "needs_revision": "수정 필요"}
+DECISION_LABELS = {"confirmed": "확인 완료", "needs_revision": "수정 필요"}
+STATUS = {**DECISION_LABELS, "noted": "근거 기록"}
 LOGGER = logging.getLogger(__name__)
 ACCESS_ERROR = "검토 권한과 초안의 최신 버전을 확인해 주세요."
 
@@ -44,11 +45,14 @@ def _modal(metadata: dict, blocks: list[dict]) -> dict:
 
 def _list_view(metadata: dict, state: dict, page: int) -> dict:
     claims, reviews = state["legal_claims"], state["legal_reviews"]
-    blocks = [_section(f"초안 v{state['version']} · {state['legal_review_label']}")]
+    blocks = [
+        _section(f"초안 v{state['version']} · {state['legal_review_label']}"),
+        _section("법률 근거 확인은 권고 사항입니다. 검토 결과나 근거만 기록할 수 있습니다."),
+    ]
     start = page * PAGE_SIZE
     for index, claim in enumerate(claims[start:start + PAGE_SIZE], start):
         review = reviews.get(index)
-        label = STATUS[review["status"]] if review else "확인 대기"
+        label = STATUS[review["status"]] if review else "기록 없음"
         blocks.append({
             **_section(f"{index + 1}. {label}\n{claim[:2750]}"),
             "accessory": _button("검토 보기", f"claim:{index}"),
@@ -87,16 +91,17 @@ def _detail_view(metadata: dict, state: dict, index: int, *, editable: bool) -> 
     blocks.append({"type": "actions", "elements": [_button("목록으로", f"page:{index // PAGE_SIZE}")]})
     view = _modal({**metadata, "claim_index": index}, blocks)
     if editable:
-        options = [{"text": _plain(label), "value": key} for key, label in STATUS.items()]
+        options = [{"text": _plain(label), "value": key} for key, label in DECISION_LABELS.items()]
         result = {"type": "static_select", "action_id": "value", "options": options}
-        if review:
+        if review.get("status") in DECISION_LABELS:
             result["initial_option"] = next(option for option in options if option["value"] == review["status"])
         blocks.extend([
-            {"type": "input", "block_id": "result", "label": _plain("검토 결과"), "element": result},
+            {"type": "input", "block_id": "result", "label": _plain("검토 결과"),
+             "optional": True, "element": result},
             _input("source_url", "공식 원문 URL", review.get("source_url", ""), 1800, optional=True),
-            _input("source_reference", "법령명·조문·시행일 또는 법원·사건번호·선고일",
+            _input("source_reference", "법령명·조문이나 판례 정보",
                    review.get("source_reference", ""), 300, optional=True),
-            _input("note", "근거가 문장을 뒷받침하는 이유 또는 수정할 내용", review.get("note", ""), 1200),
+            _input("note", "검토 메모", review.get("note", ""), 1200, optional=True),
         ])
         blocks[-1]["element"]["multiline"] = True
         view.update(callback_id=SAVE, submit=_plain("검토 저장"))
@@ -164,14 +169,15 @@ def register_legal_evidence_handlers(app, drafts: SlackDrafts) -> None:
             if not editable:
                 raise workflow.AuthorizationError("evidence cannot be updated")
             fields = view["state"]["values"]
-            status = fields["result"]["value"]["selected_option"]["value"]
+            selection = fields.get("result", {}).get("value", {}).get("selected_option") or {}
+            status = selection.get("value")
             index = metadata["claim_index"]
             workflow.record_legal_review(
                 request_id=metadata["request_id"], expected_version=metadata["version"],
                 claim_index=index, actor=actor, status=status, db_path=drafts.db_path,
-                source_url=fields["source_url"]["value"]["value"] or "",
-                source_reference=fields["source_reference"]["value"]["value"] or "",
-                note=fields["note"]["value"]["value"] or "",
+                source_url=fields.get("source_url", {}).get("value", {}).get("value") or "",
+                source_reference=fields.get("source_reference", {}).get("value", {}).get("value") or "",
+                note=fields.get("note", {}).get("value", {}).get("value") or "",
             )
         except workflow.LegalEvidenceError as exc:
             ack(response_action="errors", errors={"result": str(exc)})

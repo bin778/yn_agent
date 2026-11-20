@@ -261,8 +261,6 @@ class SlackApprovalCards:
                     "element": {"type": "plain_text_input", "action_id": "reason", "multiline": True},
                 }],
             })
-        except workflow.LegalEvidenceError as exc:
-            respond(response_type="ephemeral", replace_original=False, text=str(exc))
         except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
             respond(response_type="ephemeral", replace_original=False, text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
         except Exception as exc:

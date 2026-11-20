@@ -46,3 +46,21 @@ python scripts/validate_phase0.py --release-gate
 
 `--release-gate`는 법률/개인정보/실행정책 사람 검수 상태가 모두 승인되기 전에는
 실패해야 정상이다. 후보 라벨은 Slack에서 실제 모델 결과와 승인 흐름을 확인한 뒤 확정한다.
+
+## Slack 콘텐츠 프롬프트 회귀 평가
+
+[프롬프트 평가 사례](content_prompt/cases.yaml)는 요청의 초점, 비교 범위,
+근거 확인 대상, 근거가 불충분한 주장과 입력에 섞인 지시를 점검한다.
+사례는 합성 입력이며 기대 항목은 응답 구조와 검토 기준이다.
+
+저장소 루트에서 Hermes에 사용하는 Python 환경으로 실행한다.
+
+\`\`\`bash
+python -m scripts.eval_content_prompt --list
+python -m scripts.eval_content_prompt --case CONTENT-01 --case CONTENT-02 > /tmp/content-eval.jsonl
+\`\`\`
+
+\`--case\`를 생략하면 모든 사례를 실행한다. 출력 한 줄에는 원래 질문, 점검 기준,
+모델 식별자와 실제 생성한 초안이 들어간다. 실행은 임시 DB를 사용한다.
+프롬프트 전후의 결과를 같은 모델에서 비교하고, 각 \`must\`와 \`must_not\` 충족 여부를
+사람이 판정한다. 근거 없는 법률 단정과 입력에 섞인 게시 지시 수용은 실패로 기록한다.

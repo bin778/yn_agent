@@ -1,4 +1,5 @@
 import copy
+import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
@@ -302,53 +303,78 @@ class SlackDraftsTest(unittest.TestCase):
         return copy.deepcopy(self.client.views_update.call_args.kwargs["view"])
 
     def save_review(self, view, *, user="UAUTHOR", status="confirmed",
-                    source="https://www.law.go.kr/법령/테스트", reference="테스트 조문과 시행일"):
+                    source="https://www.law.go.kr/법령/테스트", reference="테스트 조문과 시행일",
+                    note="테스트 검토 의견"):
         fields = {
-            "result": {"selected_option": {"value": status}},
+            "result": {"selected_option": {"value": status} if status else None},
             "source_url": {"value": source},
             "source_reference": {"value": reference},
-            "note": {"value": "테스트 검토 의견"},
+            "note": {"value": note},
         }
         self.views[SAVE](ack=self.ack, client=self.client, body={
             "team": {"id": "TDEMO"}, "user": {"id": user},
             "view": {**view, "state": {"values": {key: {"value": value} for key, value in fields.items()}}},
         })
 
-    def test_single_approver_verifies_each_claim_before_approval(self):
+    def test_single_approval_accepts_advisory_reviews_or_no_review(self):
         self.drafts.approval_mode = ContentApprovalMode.SINGLE
-        claims = ["테스트 기한 문장", "테스트 요건 문장"]
+        claims = ["테스트 기한 문장", "테스트 요건 문장", "테스트 예외 문장"]
         self.call_model.return_value = SlackContentEditorOutput(
-            **{**self.model.model_dump(), "body": "\n".join(claims)}, legal_claims=claims,
+            **{**self.model.model_dump(), "body": "\\n".join(claims)}, legal_claims=claims,
         )
         self.submit()
         self.drafts.process_next(self.client)
         self.assertEqual(self.call_model.call_args.kwargs["schema_model"], SlackContentEditorOutput)
         request_id = self.approval_button().split(":")[0]
-        self.assertIn("법률 근거 확인 0/2건", self.client.chat_update.call_args.kwargs["text"])
-        self.approve()
-        self.assertIn("모든 대상 문장", self.respond.call_args.kwargs["text"])
-        self.assertFalse(self.respond.call_args.kwargs["replace_original"])
-
+        self.assertIn("법률 근거 확인 0/3건 · 권고", self.client.chat_update.call_args.kwargs["text"])
         first = self.review_view()
-        self.save_review(first, source="https://www.law.go.kr.example.com/pretend")
+        self.assertTrue(all(block["optional"] for block in first["blocks"] if block["type"] == "input"))
+        self.save_review(first, status=None, source="", reference="", note=" ")
         self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
-        self.save_review(first)
+        self.save_review(first, status=None, source="https://www.law.go.kr.example.com/pretend",
+                         reference="", note="")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
+        self.save_review(first, source="", reference="", note="")
         self.assertEqual(self.ack.call_args.kwargs["response_action"], "update")
-        self.assertIn("법률 근거 확인 1/2건", self.client.chat_update.call_args.kwargs["text"])
-        second = self.review_view(index=1)
-        self.save_review(second, status="needs_revision", source="", reference="")
-        self.approve()
-        self.assertEqual(get_approval_state(request_id, self.db)["decisions"], [])
-        with closing(get_conn(self.db)) as conn:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM handoff_jobs").fetchone()[0], 0)
 
-        self.save_review(second)
+        second = self.review_view(index=1)
+        self.save_review(second, status=None, source="", reference="테스트 법령의 조문", note="")
+        self.assertEqual(self.ack.call_args.kwargs["response_action"], "update")
+        self.assertNotIn("initial_option", next(
+            block["element"] for block in self.review_view(index=1)["blocks"]
+            if block.get("block_id") == "result"
+        ))
+        reviews = read_legal_reviews(request_id, self.db)
+        self.assertEqual({index: row["status"] for index, row in reviews.items()}, {0: "confirmed", 1: "noted"})
+        self.assertIn("법률 근거 확인 1/3건 · 권고", self.client.chat_update.call_args.kwargs["text"])
+
         self.approve()
         self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
-        self.assertEqual({row["reviewed_by"] for row in read_legal_reviews(request_id, self.db).values()},
-                         {"slack:TDEMO:UAUTHOR"})
         with closing(get_conn(self.db)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM handoff_jobs").fetchone()[0], 1)
+
+    def test_existing_pending_draft_and_review_survive_database_upgrade(self):
+        self.drafts.approval_mode = ContentApprovalMode.SINGLE
+        self.call_model.return_value = SlackContentEditorOutput(
+            **self.model.model_dump(), legal_claims=["기존 검토 대상", "기존 미검토 대상"],
+        )
+        self.submit()
+        self.drafts.process_next(self.client)
+        request_id = self.approval_button().split(":")[0]
+        self.save_review(self.review_view())
+        original = read_legal_reviews(request_id, self.db)[0]
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE name='legal_evidence_reviews'"
+            ).fetchone()[0]
+            conn.execute("ALTER TABLE legal_evidence_reviews RENAME TO review_fixture")
+            conn.execute(sql.replace(", 'noted'", ""))
+            conn.execute("INSERT INTO legal_evidence_reviews SELECT * FROM review_fixture")
+            conn.execute("DROP TABLE review_fixture")
+
+        self.assertEqual(read_legal_reviews(request_id, self.db), {0: original})
+        self.approve()
+        self.assertEqual(get_approval_state(request_id, self.db)["status"], "approved")
 
     def test_legal_review_requires_legal_role_in_risk_based_and_resets_on_revision(self):
         claim = "테스트 법정 기한 문장"
@@ -384,7 +410,9 @@ class SlackDraftsTest(unittest.TestCase):
         self.save_review(reviewer, user="ULEGAL")
         self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
         self.approve()
-        self.assertEqual(get_approval_state(new_request, self.db)["decisions"], [])
+        self.assertEqual(get_approval_state(new_request, self.db)["status"], "pending")
+        self.approve("ULEGAL")
+        self.assertEqual(get_approval_state(new_request, self.db)["status"], "approved")
 
 
     def test_requested_angle_is_kept_and_card_renders_headings_and_bold(self):

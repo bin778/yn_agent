@@ -137,7 +137,7 @@ class SlackDrafts(SlackApprovalCards):
             "legal_claims": claims,
             "legal_reviews": reviews,
             "legal_review_action_id": LEGAL_EVIDENCE_ACTION if claims else None,
-            "legal_review_label": f"법률 근거 확인 {confirmed}/{len(claims)}건",
+            "legal_review_label": f"법률 근거 확인 {confirmed}/{len(claims)}건 · 권고",
             "output": work["output"],
         }
 

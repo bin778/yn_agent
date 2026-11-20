@@ -18,6 +18,46 @@ def utc_iso(value: dt.datetime | None = None) -> str:
     return (value or utc_now()).astimezone(dt.timezone.utc).isoformat()
 
 
+_LEGAL_EVIDENCE_SCHEMA = """
+CREATE TABLE legal_evidence_reviews (
+    request_id TEXT NOT NULL REFERENCES approval_requests(request_id),
+    claim_index INTEGER NOT NULL CHECK (claim_index >= 0),
+    status TEXT NOT NULL CHECK (status IN ('confirmed', 'needs_revision', 'noted')),
+    source_url TEXT NOT NULL,
+    source_reference TEXT NOT NULL,
+    note TEXT NOT NULL,
+    reviewed_by TEXT NOT NULL,
+    reviewed_at TEXT NOT NULL,
+    PRIMARY KEY (request_id, claim_index)
+);
+"""
+
+
+def _ensure_legal_evidence_schema(conn: sqlite3.Connection) -> None:
+    query = "SELECT sql FROM sqlite_schema WHERE type='table' AND name='legal_evidence_reviews'"
+    schema = conn.execute(query).fetchone()
+    if schema is not None and "'noted'" in schema["sql"]:
+        return
+
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        schema = conn.execute(query).fetchone()
+        if schema is None:
+            conn.execute(_LEGAL_EVIDENCE_SCHEMA)
+        elif "'noted'" not in schema["sql"]:
+            # SQLite CHECK constraints require a table rebuild to add a status.
+            conn.execute("ALTER TABLE legal_evidence_reviews RENAME TO legal_evidence_reviews_previous")
+            conn.execute(_LEGAL_EVIDENCE_SCHEMA)
+            conn.execute("""
+                INSERT INTO legal_evidence_reviews (
+                    request_id, claim_index, status, source_url, source_reference, note, reviewed_by, reviewed_at
+                )
+                SELECT request_id, claim_index, status, source_url, source_reference, note, reviewed_by, reviewed_at
+                FROM legal_evidence_reviews_previous
+            """)
+            conn.execute("DROP TABLE legal_evidence_reviews_previous")
+
+
 def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path or DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
@@ -69,17 +109,6 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             approvals_required INTEGER NOT NULL DEFAULT 1 CHECK (approvals_required > 0),
             UNIQUE (request_id, role_key),
             FOREIGN KEY (request_id) REFERENCES approval_requests(request_id)
-        );
-        CREATE TABLE IF NOT EXISTS legal_evidence_reviews (
-            request_id TEXT NOT NULL REFERENCES approval_requests(request_id),
-            claim_index INTEGER NOT NULL CHECK (claim_index >= 0),
-            status TEXT NOT NULL CHECK (status IN ('confirmed', 'needs_revision')),
-            source_url TEXT NOT NULL,
-            source_reference TEXT NOT NULL,
-            note TEXT NOT NULL,
-            reviewed_by TEXT NOT NULL,
-            reviewed_at TEXT NOT NULL,
-            PRIMARY KEY (request_id, claim_index)
         );
         CREATE TABLE IF NOT EXISTS approval_decisions (
             decision_id TEXT PRIMARY KEY,
@@ -301,6 +330,11 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
         """
     )
     conn.commit()
+    try:
+        _ensure_legal_evidence_schema(conn)
+    except sqlite3.Error:
+        conn.close()
+        raise
     return conn
 
 
