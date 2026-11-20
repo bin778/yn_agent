@@ -385,3 +385,39 @@ class SlackDraftsTest(unittest.TestCase):
         self.assertEqual(self.ack.call_args.kwargs["response_action"], "errors")
         self.approve()
         self.assertEqual(get_approval_state(new_request, self.db)["decisions"], [])
+
+
+    def test_requested_angle_is_kept_and_card_renders_headings_and_bold(self):
+        topic = "AI 안경을 쓰고 세무사 등 국가자격시험에서 적발되면 어떤 처벌을 받나요?"
+        phrase = "시험기관의 제재와 형사책임"
+        self.model.title = "**국가자격시험에서 적발되면 어떤 처벌을 받나요?**"
+        self.model.hook = f"**{phrase}**을 구분합니다."
+        self.model.body = f"### 시험상 제재\n\n1. {phrase}\n\n### 형사책임\n\n<!here>"
+        self.submit(text=topic)
+        self.assertTrue(self.drafts.process_next(self.client))
+
+        prompt = self.call_model.call_args.kwargs["user_prompt"]
+        self.assertIn(topic, prompt)
+        self.assertIn("비교 범위를 유지", prompt)
+        self.assertIn("핵심 결과나 조건부터", prompt)
+        update = self.client.chat_update.call_args.kwargs
+        self.assertNotIn("**", update["text"])
+        blocks = update["blocks"]
+        runs = [
+            part
+            for block in blocks if block["type"] == "rich_text"
+            for section in block["elements"]
+            for part in section["elements"]
+        ]
+        self.assertEqual([part["text"] for part in runs if part.get("style") == {"bold": True}],
+                        [phrase, "시험상 제재", "형사책임"])
+        rendered = "".join(part["text"] for part in runs)
+        self.assertNotIn("###", rendered)
+        self.assertNotIn("**", rendered)
+        self.assertIn(f"1. {phrase}", rendered)
+        self.assertTrue(any(part["type"] == "text" and "<!here>" in part["text"] for part in runs))
+
+        request_id = self.approval_button().split(":")[0]
+        state = get_approval_state(request_id, self.db)
+        source = get_work_item(state["work_item_id"], 1, self.db)["output"]
+        self.assertEqual(source["body"], self.model.body)

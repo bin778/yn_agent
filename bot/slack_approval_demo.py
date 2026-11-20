@@ -14,6 +14,7 @@ from . import workflow
 from .db import get_conn, get_work_item
 from .schemas import KeywordItem
 from .slack_adapter.config import SlackConfigurationError, SlackMapping, SlackIdentityProvider
+from .slack_adapter.draft_markup import draft_body_blocks, plain_draft_title
 
 COMMAND = "approval-demo"
 CONTENT_COMMAND = "content-review"
@@ -55,7 +56,7 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
         "cancelled": "취소",
     }[state["status"]]
     output = state["output"]
-    subject = output["title"] if is_content else output["keyword"]
+    subject = plain_draft_title(output["title"]) if is_content else output["keyword"]
     item_type = "합성 키워드 기반 콘텐츠 초안" if is_content else "합성 키워드"
     card_title = state.get("card_title", f"PHASE 4 개발 검증 · {item_type}")
     role_label = state.get("role_label", "필요 역할")
@@ -76,13 +77,13 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     sections = [text]
     if is_content:
         flags = output.get("flagged_claims", []) + output.get("sensitive_flags", [])
-        draft = (
-            f"위험 플래그: {', '.join(flags) or '없음'}\n\n"
-            f"{output['hook']}\n\n{output['body']}"
-        )
-        sections.extend(draft[pos:pos + 1400] for pos in range(0, len(draft), 1400))
+        flags_text = f"위험 플래그: {', '.join(flags) or '없음'}"
+        sections.extend(flags_text[pos:pos + 1400] for pos in range(0, len(flags_text), 1400))
 
     blocks = [{"type": "section", "text": {"type": "plain_text", "text": section}} for section in sections]
+    if is_content:
+        body = "\n\n".join(part for part in (output["hook"], output["body"]) if part.strip())
+        blocks.extend(draft_body_blocks(body))
     if state["status"] == "pending":
         actions = state.get("actions", ACTIONS)
         value = f"{state['request_id']}:{state['version']}"

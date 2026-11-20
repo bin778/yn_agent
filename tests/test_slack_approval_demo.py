@@ -189,12 +189,18 @@ queue_channels:
         value = self.button()
         blocks = self.client.chat_update.call_args.kwargs["blocks"]
         sections = [block["text"] for block in blocks if block["type"] == "section"]
-        self.assertGreaterEqual(len(sections), 3)
+        self.assertEqual(len(sections), 2)
         self.assertTrue(all(section["type"] == "plain_text" for section in sections))
         self.assertIn("합성 초안", sections[0]["text"])
         self.assertIn("필요 역할: content_approver", sections[0]["text"])
         self.assertIn("위험 플래그: 없음", sections[1]["text"])
-        self.assertEqual("".join(section["text"] for section in sections[1:]).count("본문입니다."), 300)
+        body = "".join(
+            part["text"]
+            for block in blocks if block["type"] == "rich_text"
+            for section in block["elements"]
+            for part in section["elements"]
+        )
+        self.assertEqual(body.count("본문입니다."), 300)
 
         self.command(command, user="UOTHER")
         self.assertEqual(self.client.chat_postMessage.call_count, 2)
