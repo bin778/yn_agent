@@ -80,25 +80,39 @@ class ContentApprovalMode(str, Enum):
     SINGLE = "single"
 
 
+class KeywordApprovalMode(str, Enum):
+    LEGAL_BEFORE_DRAFT = "legal_before_draft"
+    DRAFT_ADVISORY = "draft_advisory"
+
+
 def policy_for(
     agent_id: str, output_value: dict | object,
     *, content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
+    keyword_approval_mode: KeywordApprovalMode = KeywordApprovalMode.LEGAL_BEFORE_DRAFT,
 ) -> ApprovalPolicy:
     output = _payload(output_value)
     if agent_id == "keyword_analyst":
         high = output.get("compliance_risk") == "high"
+        keyword_approval_mode = KeywordApprovalMode(keyword_approval_mode)
+        legal_required = high and keyword_approval_mode is KeywordApprovalMode.LEGAL_BEFORE_DRAFT
+        key = "keyword_standard"
+        if high:
+            key = "keyword_high" if legal_required else "keyword_high_advisory"
         return ApprovalPolicy(
-            "keyword_high" if high else "keyword_standard",
-            ("keyword_approver", "legal_compliance") if high else ("keyword_approver",),
+            key,
+            ("keyword_approver", "legal_compliance") if legal_required else ("keyword_approver",),
             dt.timedelta(days=3 if high else 7), "draft_content", "content_editor.inbox",
             risk_level="high" if high else "standard",
         )
     if agent_id == "content_editor":
-        high = bool(output.get("flagged_claims") or output.get("sensitive_flags") or legal_claims(output))
+        source_requires_legal = output.get("requires_legal_before_publish") is True
+        high = source_requires_legal or bool(
+            output.get("flagged_claims") or output.get("sensitive_flags") or legal_claims(output)
+        )
         content_approval_mode = ContentApprovalMode(content_approval_mode)
-        needs_legal = high and content_approval_mode is ContentApprovalMode.RISK_BASED
+        needs_legal = source_requires_legal or (high and content_approval_mode is ContentApprovalMode.RISK_BASED)
         key = "content_legal" if needs_legal else "content_standard"
-        if content_approval_mode is ContentApprovalMode.SINGLE:
+        if content_approval_mode is ContentApprovalMode.SINGLE and not needs_legal:
             key = "content_single"
         return ApprovalPolicy(
             key, ("content_approver", "legal_compliance") if needs_legal else ("content_approver",),
@@ -178,7 +192,28 @@ def _insert_work_item(
     content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
 ) -> dict:
     payload = _payload(output)
-    policy = policy_for(agent_id, payload, content_approval_mode=content_approval_mode)
+    if agent_id == "content_editor" and parent_version is not None:
+        parent = conn.execute(
+            "SELECT output_json FROM work_items WHERE work_item_id=? AND version=?",
+            (work_item_id, parent_version),
+        ).fetchone()
+        if parent and json.loads(parent["output_json"]).get("requires_legal_before_publish") is True:
+            payload = {**payload, "requires_legal_before_publish": True}
+    keyword_mode = KeywordApprovalMode.LEGAL_BEFORE_DRAFT
+    if agent_id == "keyword_analyst" and correlation_id:
+        brief = conn.execute(
+            "SELECT keyword_approval_mode FROM team_briefs WHERE brief_id=?", (correlation_id,),
+        ).fetchone()
+        if brief:
+            keyword_mode = KeywordApprovalMode(brief["keyword_approval_mode"])
+    policy = policy_for(
+        agent_id, payload, content_approval_mode=content_approval_mode,
+        keyword_approval_mode=keyword_mode,
+    )
+    if agent_id == "content_editor" and payload.get("requires_legal_before_publish") is True:
+        routed_to = "human_review.queue"
+    if policy.key == "keyword_high_advisory":
+        routed_to = "content_editor.inbox"
     current_time = now or utc_now()
     work_id = work_item_id or str(uuid.uuid4())
     correlation = correlation_id or str(uuid.uuid4())
@@ -256,7 +291,7 @@ def get_approval_state(request_id: str, db_path: str | Path | None = None) -> di
     conn.close()
     return {"request_id": request_id, "work_item_id": request["work_item_id"],
             "version": request["work_item_version"], "status": request["status"],
-            "expires_at": request["expires_at"],
+            "expires_at": request["expires_at"], "policy_key": request["policy_key"],
             "requirements": [{"role": row["role_key"], "required": row["approvals_required"],
                               "approved": counts.get(row["role_key"], 0)} for row in requirements],
             "decisions": decisions}

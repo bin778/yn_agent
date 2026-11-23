@@ -52,6 +52,7 @@ def _draft_content(
     db_path=None,
     content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
     collect_legal_claims: bool = False,
+    requires_legal_before_publish: bool = False,
 ) -> dict:
     """
     키워드 1건으로 초안을 작성하고 라우팅한다.
@@ -59,10 +60,11 @@ def _draft_content(
     """
     payload = _keyword_payload_from_item(keyword_item)
     return _draft(
-        "아래는 윤서진이 승인한 키워드 후보입니다.",
+        "아래는 사람이 승인한 키워드 브리프입니다. 일반 주제인 경우 원래 사건이나 당사자를 추정하지 마세요.",
         "승인된 키워드 입력", payload, correlation_id=correlation_id, db_path=db_path,
         work_item_id=work_item_id, content_approval_mode=content_approval_mode,
         collect_legal_claims=collect_legal_claims,
+        requires_legal_before_publish=requires_legal_before_publish,
     )
 
 
@@ -116,6 +118,7 @@ def _draft(
     correlation_id: str | None = None, db_path=None,
     content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
     collect_legal_claims: bool = False,
+    requires_legal_before_publish: bool = False,
 ) -> dict:
     system_prompt = build_system_prompt(AGENT_ID)
     rejections_text = _format_rejections(db_path)
@@ -138,8 +141,10 @@ SOUL.md의 판단 원칙과 금지 표현 규칙에 따라 법률 콘텐츠 초�
     )
 
     output = result.model_dump()
+    if requires_legal_before_publish:
+        output["requires_legal_before_publish"] = True
     # config.md / routine.yaml classify: flagged 또는 sensitive → human_review, else publish
-    if result.flagged_claims or result.sensitive_flags or output.get("legal_claims"):
+    if requires_legal_before_publish or result.flagged_claims or result.sensitive_flags or output.get("legal_claims"):
         target = "human_review.queue"
     else:
         target = "publish_queue"

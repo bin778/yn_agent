@@ -14,6 +14,7 @@ from typing import Any, Callable
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from ..workflow import KeywordApprovalMode
 from ..config import DB_PATH
 from ..slack_approval_demo import COMMANDS as DEMO_COMMANDS
 from ..slack_approval_demo import ApprovalDemo, SlackApprovalCards
@@ -482,7 +483,15 @@ def main() -> int:
     if os.environ.get("SLACK_TEAM_BRIEFS_ENABLED", "").strip().lower() == "true":
         if drafts is None:
             parser.error("SLACK_TEAM_BRIEFS_ENABLED requires SLACK_DRAFT_CHANNEL_ID")
-        team_briefs = SlackTeamBriefs(deps.mapping, DB_PATH, draft_channel, approval_mode=drafts.approval_mode)
+        raw_mode = os.environ.get("HERMES_TEAM_KEYWORD_APPROVAL_MODE", "legal_before_draft")
+        try:
+            keyword_mode = KeywordApprovalMode(raw_mode.strip())
+        except ValueError:
+            parser.error("HERMES_TEAM_KEYWORD_APPROVAL_MODE must be legal_before_draft or draft_advisory")
+        team_briefs = SlackTeamBriefs(
+            deps.mapping, DB_PATH, draft_channel, approval_mode=drafts.approval_mode,
+            keyword_approval_mode=keyword_mode,
+        )
     app = create_app(settings, deps, approval_demo, drafts=drafts, team_briefs=team_briefs)
     handler = SocketModeHandler(app, settings.app_token)
     stop = Event()

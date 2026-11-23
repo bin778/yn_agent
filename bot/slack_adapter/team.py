@@ -12,6 +12,7 @@ from html import escape
 from .. import workflow
 from ..db import get_conn, get_work_item
 from ..slack_approval_demo import COMMAND as KEYWORD_CARD, CONTENT_COMMAND, SlackApprovalCards, render_card
+from ..schemas import DRAFT_TOPICS
 from ..team_brief import AGENTS, TeamBriefs
 from .blocks import seoul_time_label
 from .config import SlackConfigurationError
@@ -30,9 +31,14 @@ STAGE_LABELS = {"queued": "대기", "failed": "실패", "completed": "완료"}
 
 
 def _report(jobs, items, handoffs) -> str:
-    pending_keywords = sum(
-        item["agent_id"] == AGENTS["keyword"] and item["status"] == "pending_approval"
-        for item in items
+    keywords = [item for item in items if item["agent_id"] == AGENTS["keyword"]]
+    pending = [item for item in keywords if item["status"] == "pending_approval"]
+    legal_pending = sum(item["policy_key"] == "keyword_high" and item["keyword_approved"] for item in pending)
+    pending_keywords = len(pending) - legal_pending
+    advisory = sum(
+        item["policy_key"] == "keyword_high_advisory"
+        and item["status"] in {"pending_approval", "approved"}
+        for item in keywords
     )
     drafts = sum(item["agent_id"] == "content_editor" for item in items)
     draft_waiting = sum(item["status"] in {"pending", "claimed"} for item in handoffs)
@@ -42,6 +48,10 @@ def _report(jobs, items, handoffs) -> str:
         content.append(f"초안 {drafts}건")
     if pending_keywords:
         content.append(f"키워드 승인 대기 {pending_keywords}건")
+    if legal_pending:
+        content.append(f"법무 승인 대기 {legal_pending}건")
+    if advisory:
+        content.append(f"법무 검토 권고 {advisory}건")
     if draft_waiting:
         content.append(f"초안 작업 대기 {draft_waiting}건")
     if draft_failed:
@@ -65,13 +75,18 @@ def _report(jobs, items, handoffs) -> str:
         ads = f"개선안 {len(performance)}건"
     elif jobs["performance"]["status"] == "completed":
         ads = "개선안 없음"
+    next_actions = []
+    if pending_keywords:
+        next_actions.append("제작할 키워드를 승인해 주세요.")
+    if legal_pending:
+        next_actions.append("고위험 후보는 별도의 법무 승인자가 확인해 주세요.")
+    next_action = " ".join(next_actions) or "직원별 산출물과 근거는 이 메시지의 스레드에서 확인할 수 있습니다."
     return "\n".join([
         TITLE,
         f"콘텐츠 제작팀 · {' / '.join(content)}",
         f"데이터 분석팀 · {data_status}",
         f"퍼포먼스 마케팅팀 · {ads}",
-        "확인할 일 · 스레드에서 제작할 키워드를 승인해 주세요." if pending_keywords else
-        "직원별 산출물과 근거는 이 메시지의 스레드에서 확인할 수 있습니다.",
+        f"확인할 일 · {next_action}" if next_actions else next_action,
     ])
 
 
@@ -101,9 +116,15 @@ class SlackTeamBriefs(SlackApprovalCards):
     }
     reason_modal = "hermes_team_keyword_reason"
 
-    def __init__(self, mapping, db_path, channel_id, *, approval_mode):
+    def __init__(
+        self, mapping, db_path, channel_id, *, approval_mode,
+        keyword_approval_mode=workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT,
+    ):
         super().__init__(mapping, db_path)
-        self.team = TeamBriefs(db_path, mapping.workspace_id, channel_id, approval_mode)
+        self.team = TeamBriefs(
+            db_path, mapping.workspace_id, channel_id, approval_mode,
+            keyword_approval_mode=keyword_approval_mode,
+        )
 
     def _actor(self, team_id, channel_id, user_id):
         if channel_id != self.team.channel_id:
@@ -145,6 +166,19 @@ class SlackTeamBriefs(SlackApprovalCards):
                 f"승인을 기록했습니다 ({approved}/{required}). "
                 f"남은 승인: {', '.join(missing_roles)}."
             )
+        detail = (
+            f"검색 의도 {output['intent_type']} · 위험도 {output['compliance_risk']}\n"
+            f"{output['reason']}\n{output.get('compliance_note', '')}"
+        )
+        if state["policy_key"] == "keyword_high_advisory":
+            general_topic = DRAFT_TOPICS.get(output.get("draft_topic_category"), DRAFT_TOPICS["general"])
+            detail = (
+                "법무·컴플라이언스 검토 권고 · 검토용 초안 작성 가능\n"
+                f"검토용 초안 주제 · {general_topic}\n"
+                "외부 발행 전에 별도 법무 승인이 필요합니다.\n\n" + detail
+            )
+            if state["status"] == "approved":
+                approval_feedback = "승인 완료 · 일반화한 주제로 검토용 초안을 작성합니다. 외부 발행 전 법무 승인이 필요합니다."
         return {
             **state, "brief_id": brief_id, "command": KEYWORD_CARD, "output": output,
             "role": ", ".join(roles), "role_label": "남은 승인 역할" if pending else "필요 역할",
@@ -158,8 +192,7 @@ class SlackTeamBriefs(SlackApprovalCards):
             **({"status_label": "일부 승인 완료"} if pending and approved else {}),
             "expiry_label": seoul_time_label(state["expires_at"]),
             "card_title": "윤서진 · 키워드 후보 · 합성 데이터",
-            "detail": f"검색 의도 {output['intent_type']} · 위험도 {output['compliance_risk']}\n"
-                      f"{output['reason']}\n{output.get('compliance_note', '')}",
+            "detail": detail,
         }
 
     def handle_command(self, *, ack, command, respond) -> None:
@@ -242,7 +275,11 @@ class SlackTeamBriefs(SlackApprovalCards):
                 text, blocks = render_card({
                     **state, "command": CONTENT_COMMAND, "output": item["output"], "actions": {},
                     "card_title": "한도윤 · 검토용 콘텐츠 초안 · 합성 데이터",
-                    "role": "팀 브리핑에서 초안 확인", "status_label": "브리핑용 초안 작성 완료",
+                    "role": (
+                        "외부 발행 전 콘텐츠·법무 승인 필요"
+                        if item["output"].get("requires_legal_before_publish") else "팀 브리핑에서 초안 확인"
+                    ),
+                    "status_label": "브리핑용 초안 작성 완료",
                     "expiry_label": seoul_time_label(state["expires_at"]),
                 })
                 self._reply(client, brief, thread_ts, item["work_item_id"], text, blocks=blocks)

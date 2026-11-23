@@ -56,9 +56,13 @@ class SlackTeamTest(unittest.TestCase):
         for name in fixtures:
             self.enterContext(patch(f"bot.agents.{name}.get_model_identity", return_value="test/model"))
 
-    def new_worker(self):
+    def new_worker(
+        self, mode=workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT,
+        content_mode=workflow.ContentApprovalMode.RISK_BASED,
+    ):
         return SlackTeamBriefs(
-            self.mapping, self.db, "CCHANNEL", approval_mode=workflow.ContentApprovalMode.RISK_BASED,
+            self.mapping, self.db, "CCHANNEL", approval_mode=content_mode,
+            keyword_approval_mode=mode,
         )
 
     def submit(self, **changes):
@@ -122,6 +126,9 @@ class SlackTeamTest(unittest.TestCase):
         self.client.views_open.assert_not_called()
         self.drain()
         model.assert_not_called()
+        report = next(call.kwargs["text"] for call in reversed(self.client.chat_update.call_args_list)
+                      if call.kwargs["ts"] == brief["message_ts"])
+        self.assertIn("법무 승인 대기 1건", report)
 
         self.assertIn("초안 작업을 대기열", self.keyword_action("ULEGAL"))
         # Simulate the worker dying after claiming the approved handoff.
@@ -144,6 +151,77 @@ class SlackTeamTest(unittest.TestCase):
                           if call.kwargs["ts"] == brief["message_ts"]]
         self.assertIn("초안 1건", parent_updates[-1])
         self.assertIn("개선안 1건", parent_updates[-1])
+
+    def test_advisory_approval_creates_generalized_draft_with_separate_legal_approval(self):
+        content_mode = workflow.ContentApprovalMode.SINGLE
+        advisory = self.new_worker(workflow.KeywordApprovalMode.DRAFT_ADVISORY, content_mode)
+        result = self.models["keyword_analyst"].return_value
+        result.items[0].keyword = "합성 사건 고유 키워드"
+        result.items[0].draft_topic_category = "sexual_offense"
+        brief_id = advisory.team.enqueue(trigger_id="advisory", user_id="UKEYWORD", scenario="normal")
+
+        # A restart and mode change must not change the accepted brief's policy.
+        self.drain(self.new_worker(content_mode=content_mode))
+        _, items, handoffs = advisory.team.snapshot(brief_id)
+        self.assertEqual(handoffs, [])
+        keyword = next(item for item in items if item["agent_id"] == "keyword_analyst")
+        state = advisory._state(keyword["request_id"])
+        self.assertEqual([row["role"] for row in state["requirements"]], ["keyword_approver"])
+        self.assertIn("법무·컴플라이언스 검토 권고", state["detail"])
+        self.assertIn("성범죄 사건의 일반적인 수사 절차", state["detail"])
+        self.assertIn("법무 검토 권고 1건", "\n".join(
+            call.kwargs["text"] for call in self.client.chat_update.call_args_list
+        ))
+
+        self.assertIn("일반화한 주제", self.keyword_action("UKEYWORD"))
+        self.drain(self.new_worker(content_mode=content_mode))
+        draft_call = self.models["content_editor"].call_args.kwargs["user_prompt"]
+        self.assertIn("성범죄 사건의 일반적인 수사 절차", draft_call)
+        self.assertNotIn("합성 사건 고유 키워드", draft_call)
+        _, items, handoffs = advisory.team.snapshot(brief_id)
+        self.assertEqual([row["status"] for row in handoffs], ["completed"])
+        draft = next(item for item in items if item["agent_id"] == "content_editor")
+        self.assertEqual(draft["routed_to"], "human_review.queue")
+        self.assertTrue(draft["output"]["requires_legal_before_publish"])
+
+        editor = workflow.ActorContext.verified_actor("editor", {"content_approver"})
+        edited = {key: value for key, value in draft["output"].items()
+                  if key != "requires_legal_before_publish"}
+        revised = workflow.revise_pending_content(
+            request_id=draft["request_id"], expected_version=1, actor=editor,
+            revised_output=edited, db_path=self.db,
+        )
+        self.assertEqual(revised["required_roles"], ["content_approver", "legal_compliance"])
+        state = workflow.decide(
+            request_id=revised["request_id"], expected_version=2, actor=editor,
+            acting_role="content_approver", decision="approved", db_path=self.db,
+        )
+        self.assertEqual(state["status"], "pending")
+        self.assertEqual(workflow.claim_handoffs("queue_for_publish", db_path=self.db), [])
+
+    def test_existing_brief_keeps_two_roles_after_switch_to_advisory(self):
+        self.submit()
+        self.drain(self.new_worker(workflow.KeywordApprovalMode.DRAFT_ADVISORY))
+        brief = self.brief()
+        self.assertEqual(brief["keyword_approval_mode"], "legal_before_draft")
+        _, items, _ = self.briefs.team.snapshot(brief["brief_id"])
+        keyword = next(item for item in items if item["agent_id"] == "keyword_analyst")
+        self.assertEqual(
+            [row["role"] for row in self.briefs._state(keyword["request_id"])["requirements"]],
+            ["keyword_approver", "legal_compliance"],
+        )
+
+    def test_existing_database_adds_mode_without_changing_approval_requirements(self):
+        self.submit()
+        self.drain()
+        brief_id = self.brief()["brief_id"]
+        with closing(get_conn(self.db)) as conn, conn:
+            conn.execute("ALTER TABLE team_briefs DROP COLUMN keyword_approval_mode")
+
+        self.assertEqual(self.briefs.team.get_brief(brief_id)["keyword_approval_mode"], "legal_before_draft")
+        _, items, _ = self.briefs.team.snapshot(brief_id)
+        request = next(item["request_id"] for item in items if item["agent_id"] == "keyword_analyst")
+        self.assertEqual(len(self.briefs._state(request)["requirements"]), 2)
 
     def test_reject_feedback_and_no_draft_handoff(self):
         self.submit()

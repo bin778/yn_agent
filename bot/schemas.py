@@ -6,6 +6,16 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 
+DRAFT_TOPICS = {
+    "investigation": "형사 사건의 경찰 조사 절차와 출석 준비",
+    "sexual_offense": "성범죄 사건의 일반적인 수사 절차와 상담 준비",
+    "traffic": "교통 관련 형사 사건의 조사 절차와 상담 준비",
+    "appeal": "형사 사건 처분에 불복할 때 일반적으로 확인할 절차",
+    "settlement": "형사 사건에서 합의의 의미와 상담 전 확인 사항",
+    "general": "형사 사건 상담 전에 일반적으로 확인할 절차와 준비 사항",
+}
+
+
 class KeywordItem(BaseModel):
     keyword: str
     estimated_search_volume: int
@@ -14,6 +24,9 @@ class KeywordItem(BaseModel):
     compliance_risk: Literal["low", "medium", "high"]
     compliance_note: str = Field(default="", description="medium/high일 경우 사유")
     reason: str
+    draft_topic_category: Literal["investigation", "sexual_offense", "traffic", "appeal", "settlement", "general"] = (
+        Field(default="general", description="고위험 후보의 비식별 검토용 초안에 적합한 일반 주제 분류")
+    )
 
 
 class KeywordAnalystOutput(BaseModel):

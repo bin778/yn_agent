@@ -11,6 +11,7 @@ from pathlib import Path
 from . import workflow
 from .agents import content_editor, data_assistant, keyword_analyst, performance_analyst
 from .db import get_conn, get_work_item, utc_iso
+from .schemas import DRAFT_TOPICS
 
 LOGGER = logging.getLogger(__name__)
 AGENTS = {
@@ -21,20 +22,27 @@ AGENTS = {
 
 
 class TeamBriefs:
-    def __init__(self, db_path: Path, team_id: str, channel_id: str, approval_mode):
+    def __init__(
+        self, db_path: Path, team_id: str, channel_id: str, approval_mode: workflow.ContentApprovalMode,
+        *, keyword_approval_mode: workflow.KeywordApprovalMode = workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT,
+    ):
         self.db_path = db_path
         self.team_id = team_id
         self.channel_id = channel_id
         self.approval_mode = approval_mode
+        self.keyword_approval_mode = workflow.KeywordApprovalMode(keyword_approval_mode)
 
     def enqueue(self, *, trigger_id: str, user_id: str, scenario: str) -> str:
         brief_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"hermes:brief:{self.team_id}:{trigger_id}"))
         with closing(get_conn(self.db_path)) as conn, conn:
             created = conn.execute(
                 """INSERT INTO team_briefs
-                   (brief_id, team_id, channel_id, user_id, tracking_scenario, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(brief_id) DO NOTHING""",
-                (brief_id, self.team_id, self.channel_id, user_id, scenario, utc_iso()),
+                   (brief_id, team_id, channel_id, user_id, tracking_scenario, created_at, keyword_approval_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(brief_id) DO NOTHING""",
+                (
+                    brief_id, self.team_id, self.channel_id, user_id, scenario, utc_iso(),
+                    self.keyword_approval_mode.value,
+                ),
             ).rowcount
             if created:
                 conn.executemany(
@@ -58,7 +66,11 @@ class TeamBriefs:
                 "SELECT * FROM team_brief_jobs WHERE brief_id=?", (brief_id,)
             )}
             work = [dict(row) for row in conn.execute(
-                """SELECT w.*, a.request_id FROM work_items w LEFT JOIN approval_requests a
+                """SELECT w.*, a.request_id, a.policy_key,
+                          EXISTS (SELECT 1 FROM approval_decisions d
+                                  WHERE d.request_id=a.request_id AND d.actor_role='keyword_approver'
+                                    AND d.decision='approved') AS keyword_approved
+                   FROM work_items w LEFT JOIN approval_requests a
                      ON a.work_item_id=w.work_item_id AND a.work_item_version=w.version
                    WHERE w.correlation_id=? AND w.version=(
                        SELECT MAX(v.version) FROM work_items v WHERE v.work_item_id=w.work_item_id
@@ -162,10 +174,16 @@ class TeamBriefs:
         error = None
         if get_work_item(work_id, db_path=self.db_path) is None:
             try:
+                keyword = row["output"]
+                high_risk = keyword.get("compliance_risk") == "high"
+                brief = self.get_brief(brief_id)
+                if high_risk and brief["keyword_approval_mode"] == workflow.KeywordApprovalMode.DRAFT_ADVISORY.value:
+                    category = keyword.get("draft_topic_category", "general")
+                    keyword = {"keyword": DRAFT_TOPICS.get(category, DRAFT_TOPICS["general"])}
                 content_editor._draft_content(
-                    row["output"], correlation_id=brief_id, db_path=self.db_path,
+                    keyword, correlation_id=brief_id, db_path=self.db_path,
                     work_item_id=work_id, content_approval_mode=self.approval_mode,
-                    collect_legal_claims=True,
+                    collect_legal_claims=True, requires_legal_before_publish=high_risk,
                 )
             except Exception as exc:
                 error = type(exc).__name__

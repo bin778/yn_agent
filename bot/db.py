@@ -58,6 +58,20 @@ def _ensure_legal_evidence_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TABLE legal_evidence_reviews_previous")
 
 
+def _ensure_team_brief_approval_mode(conn: sqlite3.Connection) -> None:
+    columns = "PRAGMA table_info(team_briefs)"
+    if any(row["name"] == "keyword_approval_mode" for row in conn.execute(columns)):
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not any(row["name"] == "keyword_approval_mode" for row in conn.execute(columns)):
+            conn.execute("""
+                ALTER TABLE team_briefs ADD COLUMN keyword_approval_mode TEXT NOT NULL
+                DEFAULT 'legal_before_draft'
+                CHECK (keyword_approval_mode IN ('legal_before_draft', 'draft_advisory'))
+            """)
+
+
 def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path or DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
@@ -91,6 +105,8 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             channel_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             tracking_scenario TEXT NOT NULL,
+            keyword_approval_mode TEXT NOT NULL DEFAULT 'legal_before_draft'
+                CHECK (keyword_approval_mode IN ('legal_before_draft', 'draft_advisory')),
             created_at TEXT NOT NULL,
             message_ts TEXT,
             sync_version INTEGER NOT NULL DEFAULT 1,
@@ -374,6 +390,7 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.commit()
     try:
         _ensure_legal_evidence_schema(conn)
+        _ensure_team_brief_approval_mode(conn)
     except sqlite3.Error:
         conn.close()
         raise

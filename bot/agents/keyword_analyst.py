@@ -43,6 +43,8 @@ def run_daily_keyword_scan(*, db_path=None, record_work_item=None) -> list[dict]
 
     user_prompt = f"""아래는 최근 검색 데이터입니다. SOUL.md의 판단 원칙과 컴플라이언스 규정에 따라
 각 항목의 urgency_level, compliance_risk를 판정하고 JSON으로 응답하세요.
+고위험 후보에는 장소·사건·개인을 제외한 일반 검토용 주제에 맞게 draft_topic_category를 선택하세요.
+선택지는 investigation(수사), sexual_offense(성범죄), traffic(교통), appeal(불복), settlement(합의), general(일반)입니다.
 
 # 최근 작업 이력 (패턴 참고용)
 {history_text}
