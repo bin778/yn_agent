@@ -80,18 +80,20 @@ class SlackTeamTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         return dict(rows[0])
 
-    def approve_keyword(self, user):
-        action_id = "hermes_team_keyword_approve"
+    def keyword_action(self, user, action_id="hermes_team_keyword_approve"):
         card = next(call.kwargs for call in self.client.chat_update.call_args_list
                     if any(el.get("action_id") == action_id
                            for block in call.kwargs.get("blocks", []) for el in block.get("elements", [])))
         button = next(el for block in card["blocks"] for el in block.get("elements", [])
                       if el["action_id"] == action_id)
+        respond = Mock()
         self.actions[action_id](
             ack=Mock(), body={"team": {"id": "TTEAM"}, "channel": {"id": "CCHANNEL"},
-                              "user": {"id": user}, "message": {"ts": card["ts"]}},
-            action={"action_id": action_id, "value": button["value"]}, respond=Mock(), client=self.client,
+                              "user": {"id": user}, "message": {"ts": card["ts"]}, "trigger_id": "test-trigger"},
+            action={"action_id": action_id, "value": button["value"]}, respond=respond, client=self.client,
         )
+
+        return respond.call_args.kwargs["text"] if respond.called else None
 
     def test_request_roles_and_candidate_approval_through_bolt_handlers(self):
         self.submit(channel_id="COTHER")
@@ -105,13 +107,23 @@ class SlackTeamTest(unittest.TestCase):
         self.assertIsNone(get_tracking_status(self.db))
         model = self.models["content_editor"]
         model.assert_not_called()
-        self.approve_keyword("UCONTENT")
-        self.approve_keyword("UKEYWORD")
-        self.approve_keyword("UKEYWORD")
+        self.keyword_action("UCONTENT")
+        version_before_approval = self.brief()["sync_version"]
+        response = self.keyword_action("UKEYWORD")
+        self.assertIn("승인을 기록했습니다 (1/2)", response)
+        self.assertIn("법무·컴플라이언스 승인자", response)
+        card = self.client.chat_update.call_args.kwargs["text"]
+        self.assertIn("상태: 일부 승인 완료", card)
+        self.assertIn("남은 승인 역할: 법무·컴플라이언스 승인자", card)
+        self.assertGreater(self.brief()["sync_version"], version_before_approval)
+        self.assertIn("이미 승인하셨습니다", self.keyword_action("UKEYWORD"))
+        conflict = self.keyword_action("UKEYWORD", "hermes_team_keyword_reject")
+        self.assertIn("이미 결정을 남기셨습니다", conflict)
+        self.client.views_open.assert_not_called()
         self.drain()
         model.assert_not_called()
 
-        self.approve_keyword("ULEGAL")
+        self.assertIn("초안 작업을 대기열", self.keyword_action("ULEGAL"))
         # Simulate the worker dying after claiming the approved handoff.
         self.assertEqual(workflow.claim_handoffs("draft_content", db_path=self.db), [])
         claims = workflow.claim_handoffs("draft_content", db_path=self.db, team_brief_id=brief["brief_id"])
@@ -132,6 +144,22 @@ class SlackTeamTest(unittest.TestCase):
                           if call.kwargs["ts"] == brief["message_ts"]]
         self.assertIn("초안 1건", parent_updates[-1])
         self.assertIn("개선안 1건", parent_updates[-1])
+
+    def test_reject_feedback_and_no_draft_handoff(self):
+        self.submit()
+        self.drain()
+        self.keyword_action("UKEYWORD", "hermes_team_keyword_reject")
+        view = self.client.views_open.call_args.kwargs["view"]
+        view["state"] = {"values": {"reason": {"reason": {"value": "테스트 반려 사유"}}}}
+        self.briefs.handle_view(
+            ack=Mock(), client=self.client,
+            body={"team": {"id": "TTEAM"}, "user": {"id": "UKEYWORD"}, "view": view},
+        )
+        self.assertEqual(self.client.chat_postEphemeral.call_args.kwargs["text"], "키워드를 반려했습니다.")
+        _, items, handoffs = self.briefs.team.snapshot(self.brief()["brief_id"])
+        keyword = next(item for item in items if item["agent_id"] == "keyword_analyst")
+        self.assertEqual(keyword["status"], "rejected")
+        self.assertEqual(handoffs, [])
 
     def test_critical_branch_blocks_ads_and_leaves_global_tracking_untouched(self):
         work = workflow.create_work_item(

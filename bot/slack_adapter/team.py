@@ -130,10 +130,32 @@ class SlackTeamBriefs(SlackApprovalCards):
         if self.team.get_brief(brief_id) is None:
             raise workflow.NotFoundError("keyword is outside this team channel")
         output = work["output"]
-        roles = [ROLE_LABELS[entry["role"]] for entry in state["requirements"]]
+        requirements = state["requirements"]
+        missing_roles = [
+            ROLE_LABELS[entry["role"]]
+            for entry in requirements if entry["approved"] < entry["required"]
+        ]
+        approved = sum(entry["approved"] for entry in requirements)
+        required = sum(entry["required"] for entry in requirements)
+        pending = state["status"] == "pending"
+        roles = missing_roles if pending else [ROLE_LABELS[entry["role"]] for entry in requirements]
+        approval_feedback = "승인 완료 · 콘텐츠 초안 작업을 대기열에 등록했습니다."
+        if pending:
+            approval_feedback = (
+                f"승인을 기록했습니다 ({approved}/{required}). "
+                f"남은 승인: {', '.join(missing_roles)}."
+            )
         return {
             **state, "brief_id": brief_id, "command": KEYWORD_CARD, "output": output,
-            "role": ", ".join(roles), "actions": self.actions,
+            "role": ", ".join(roles), "role_label": "남은 승인 역할" if pending else "필요 역할",
+            "actions": self.actions, "approval_progress": f"{approved}/{required}",
+            "approval_feedback": approval_feedback,
+            "duplicate_approval_feedback": (
+                f"이미 승인하셨습니다. 남은 승인: {', '.join(missing_roles)}."
+                if pending else "이미 승인 처리된 키워드입니다."
+            ),
+            "rejection_feedback": "키워드를 반려했습니다.",
+            **({"status_label": "일부 승인 완료"} if pending and approved else {}),
             "expiry_label": seoul_time_label(state["expires_at"]),
             "card_title": "윤서진 · 키워드 후보 · 합성 데이터",
             "detail": f"검색 의도 {output['intent_type']} · 위험도 {output['compliance_risk']}\n"

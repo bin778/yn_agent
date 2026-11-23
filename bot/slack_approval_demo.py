@@ -120,6 +120,9 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
     return escape(text, quote=False), blocks
 
 
+DECISION_CONFLICT = "이 카드에 이미 결정을 남기셨습니다. 기존 결정은 그대로 유지됩니다."
+
+
 class SlackApprovalCards:
     actions = ACTIONS
     reason_modal = REASON_MODAL
@@ -207,7 +210,7 @@ class SlackApprovalCards:
             state = self._bound_state(team_id, channel_id, message_ts, request_id, version)
             acting_role = self._acting_role(actor, state)
             try:
-                workflow.decide(
+                result = workflow.decide(
                     request_id=request_id,
                     expected_version=version,
                     actor=actor,
@@ -221,6 +224,8 @@ class SlackApprovalCards:
                 raise
             updated = self._state(request_id)
             self._update(client, channel_id, message_ts, updated)
+            if result.get("duplicate") and updated.get("duplicate_approval_feedback"):
+                updated["approval_feedback"] = updated["duplicate_approval_feedback"]
             return updated
 
     def handle_action(self, *, ack, body: dict, action: dict, respond, client) -> None:
@@ -250,6 +255,11 @@ class SlackApprovalCards:
                     except Exception as exc:
                         LOGGER.warning("Slack approval confirmation failed error_type=%s", type(exc).__name__)
                 return
+            if any(
+                entry["actor_id"] == actor.actor_id and entry["decision"] != decision
+                for entry in state["decisions"]
+            ):
+                raise workflow.InvalidTransitionError("actor has already decided this request")
             if state["status"] != "pending":
                 raise workflow.StaleActionError("request is already closed")
             client.views_open(trigger_id=body["trigger_id"], view={
@@ -268,10 +278,13 @@ class SlackApprovalCards:
                     "element": {"type": "plain_text_input", "action_id": "reason", "multiline": True},
                 }],
             })
+        except workflow.InvalidTransitionError:
+            LOGGER.info("approval action conflict request_id=%s", request_id)
+            respond(response_type="ephemeral", replace_original=False, text=DECISION_CONFLICT)
         except (KeyError, ValueError, SlackConfigurationError, workflow.WorkflowError):
             respond(response_type="ephemeral", replace_original=False, text="이 승인 요청은 처리할 수 없습니다. 권한과 카드의 최신 상태를 확인해 주세요.")
         except Exception as exc:
-            LOGGER.warning("approval action failed error_type=%s", type(exc).__name__)
+            LOGGER.warning("approval action failed request_id=%s error_type=%s", request_id, type(exc).__name__)
             retry = (
                 self._refresh_hint(subcommand, request_id) if subcommand and request_id else ""
             )
@@ -288,6 +301,7 @@ class SlackApprovalCards:
         ack()
         user_id = body.get("user", {}).get("id", "")
         channel_id = None
+        request_id = None
         try:
             metadata = json.loads(view["private_metadata"])
             team_id = body.get("team", {}).get("id", "")
@@ -298,21 +312,26 @@ class SlackApprovalCards:
             _, decision = self.actions[metadata["action_id"]]
             if decision == "approved":
                 raise ValueError("unsupported modal decision")
-            self._apply(
+            request_id = str(uuid.UUID(metadata["request_id"]))
+            updated = self._apply(
                 client=client, actor=actor, team_id=team_id, channel_id=channel_id,
-                message_ts=metadata["message_ts"], request_id=metadata["request_id"],
+                message_ts=metadata["message_ts"], request_id=request_id,
                 version=metadata["version"], decision=decision, reason=reason,
             )
+        except workflow.InvalidTransitionError:
+            LOGGER.info("approval modal conflict request_id=%s", request_id)
+            feedback = DECISION_CONFLICT
         except Exception as exc:
-            LOGGER.warning("approval modal failed error_type=%s", type(exc).__name__)
-            if channel_id is not None:
-                try:
-                    client.chat_postEphemeral(
-                        channel=channel_id, user=user_id,
-                        text="요청을 처리하거나 표시하지 못했습니다. 승인 카드의 최신 상태를 확인해 주세요.",
-                    )
-                except Exception as notify_error:
-                    LOGGER.warning("approval notification failed error_type=%s", type(notify_error).__name__)
+            LOGGER.warning("approval modal failed request_id=%s error_type=%s", request_id, type(exc).__name__)
+            feedback = "요청을 처리하거나 표시하지 못했습니다. 승인 카드의 최신 상태를 확인해 주세요."
+        else:
+            feedback = updated.get("rejection_feedback") if decision == "rejected" else None
+
+        if channel_id is not None and feedback:
+            try:
+                client.chat_postEphemeral(channel=channel_id, user=user_id, text=feedback)
+            except Exception as exc:
+                LOGGER.warning("approval notification failed request_id=%s error_type=%s", request_id, type(exc).__name__)
 
 
 class ApprovalDemo(SlackApprovalCards):

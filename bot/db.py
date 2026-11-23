@@ -184,6 +184,12 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             UNIQUE (work_item_id, work_item_version, handoff_type),
             FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
         );
+        CREATE TRIGGER IF NOT EXISTS team_brief_on_approval_decision
+        AFTER INSERT ON approval_decisions WHEN NEW.decision='approved'
+        BEGIN
+            UPDATE team_briefs SET sync_version=sync_version+1
+             WHERE brief_id=(SELECT correlation_id FROM approval_requests WHERE request_id=NEW.request_id);
+        END;
         CREATE TRIGGER IF NOT EXISTS team_brief_on_approval_status
         AFTER UPDATE OF status ON approval_requests WHEN OLD.status != NEW.status
         BEGIN
