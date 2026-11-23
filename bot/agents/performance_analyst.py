@@ -26,8 +26,8 @@ from ..config import USE_FAKE_DATA
 AGENT_ID = "performance_analyst"
 
 
-def _format_history() -> str:
-    rows = recent_history(AGENT_ID, limit=5)
+def _format_history(db_path=None) -> str:
+    rows = recent_history(AGENT_ID, limit=5, db_path=db_path)
     if not rows:
         return "(최근 제안 이력 없음)"
     lines = []
@@ -52,7 +52,9 @@ def _classify_targets(item: BidRecommendation) -> list[str]:
     return targets
 
 
-def run_bid_optimization(tracking_override: str | None = None) -> dict:
+def run_bid_optimization(
+    tracking_override: str | None = None, *, db_path=None, record_work_item=None,
+) -> dict:
     """
     매일 08:30 / 슬래시커맨드가 실행하는 작업.
 
@@ -63,7 +65,8 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
       halted=True 이면 recommendations 없음, halt_reason / notify_targets 포함
       아니면 {"results": [{"item", "targets", "work_item_id", "version"}, ...], "caution": bool, "tracking_status": str}
     """
-    tracking = get_tracking_status()
+    record = record_work_item or create_work_item
+    tracking = None if tracking_override else get_tracking_status(db_path)
     if tracking_override:
         key = tracking_override.lower().strip()
         status = {"critical": "Critical", "warning": "Warning"}.get(key, "Normal")
@@ -84,12 +87,13 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
             "notify_targets": ["dev_team.queue"],
             "results": [],
         }
-        workflow_ref = create_work_item(
+        workflow_ref = record(
             agent_id=AGENT_ID,
             output={"halted": True, "reason": halt_payload["halt_reason"], "tracking_status": status},
             routed_to="dev_team.queue",
             model_version="policy-engine/no-llm",
             input_summary="halt:tracking_critical",
+            db_path=db_path,
         )
         halt_payload.update(workflow_ref)
         return halt_payload
@@ -97,7 +101,7 @@ def run_bid_optimization(tracking_override: str | None = None) -> dict:
     caution = status == "Warning"
     ads_data = get_fake_ads_data() if USE_FAKE_DATA else get_fake_ads_data()
     system_prompt = build_system_prompt(AGENT_ID)
-    history_text = _format_history()
+    history_text = _format_history(db_path)
 
     user_prompt = f"""아래는 전일 Google Ads / Naver 검색광고 성과 데이터입니다.
 SOUL.md 원칙에 따라 입찰/예산 조정 제안을 JSON으로 응답하세요.
@@ -133,12 +137,13 @@ status={status}, caution={caution}
             item = item.model_copy(update={"sensitive_keyword": True})
 
         targets = _classify_targets(item)
-        workflow_ref = create_work_item(
+        workflow_ref = record(
             agent_id=AGENT_ID,
             output=item.model_dump(),
             routed_to=",".join(targets),
             model_version=get_model_identity(),
             input_summary=item.keyword,
+            db_path=db_path,
         )
         routed_results.append({"item": item, "targets": targets, **workflow_ref})
 

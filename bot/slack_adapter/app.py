@@ -32,6 +32,8 @@ from .fixtures import SlackTestFixture, load_test_fixture
 from .legal_evidence import register_legal_evidence_handlers
 from .publish import register_publish_handlers
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
+from .team import COMMAND as TEAM_COMMAND
+from .team import SlackTeamBriefs
 
 
 LOGGER = logging.getLogger("hermes.slack")
@@ -367,7 +369,7 @@ def _register_approval_cards(app: App, cards: SlackApprovalCards) -> None:
 
 def register_handlers(
     app: App, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None,
-    *, drafts: SlackDrafts | None = None,
+    *, drafts: SlackDrafts | None = None, team_briefs: SlackTeamBriefs | None = None,
 ) -> None:
     @app.command(COMMAND)
     def _command(ack, command, respond, client):
@@ -396,6 +398,13 @@ def register_handlers(
         @app.command(DRAFT_COMMAND)
         def _draft_command(ack, command, respond):
             drafts.handle_command(ack=ack, command=command, respond=respond)
+
+    if team_briefs is not None:
+        _register_approval_cards(app, team_briefs)
+
+        @app.command(TEAM_COMMAND)
+        def _team_command(ack, command, respond):
+            team_briefs.handle_command(ack=ack, command=command, respond=respond)
 
     def _action(ack, body, action, respond, client):
         handle_action(
@@ -433,12 +442,12 @@ def verify_slack_workspace(client: Any, mapping: SlackMapping) -> dict:
 
 def create_app(
     settings: SlackSettings, deps: SlackDependencies, approval_demo: ApprovalDemo | None = None,
-    *, drafts: SlackDrafts | None = None,
+    *, drafts: SlackDrafts | None = None, team_briefs: SlackTeamBriefs | None = None,
 ) -> App:
     settings.validate_runtime()
     app = App(token=settings.bot_token)
     verify_slack_workspace(app.client, deps.mapping)
-    register_handlers(app, deps, approval_demo, drafts=drafts)
+    register_handlers(app, deps, approval_demo, drafts=drafts, team_briefs=team_briefs)
     return app
 
 
@@ -469,11 +478,16 @@ def main() -> int:
         except SlackConfigurationError as exc:
             parser.error(str(exc))
         drafts = SlackDrafts(deps.mapping, DB_PATH, draft_channel, approval_mode=approval_mode)
-    app = create_app(settings, deps, approval_demo, drafts=drafts)
+    team_briefs = None
+    if os.environ.get("SLACK_TEAM_BRIEFS_ENABLED", "").strip().lower() == "true":
+        if drafts is None:
+            parser.error("SLACK_TEAM_BRIEFS_ENABLED requires SLACK_DRAFT_CHANNEL_ID")
+        team_briefs = SlackTeamBriefs(deps.mapping, DB_PATH, draft_channel, approval_mode=drafts.approval_mode)
+    app = create_app(settings, deps, approval_demo, drafts=drafts, team_briefs=team_briefs)
     handler = SocketModeHandler(app, settings.app_token)
     stop = Event()
     if drafts is not None:
-        Thread(target=drafts.run, args=(app.client, stop), name="slack-drafts", daemon=True).start()
+        Thread(target=drafts.run, args=(app.client, stop, team_briefs), name="slack-drafts", daemon=True).start()
     LOGGER.info(
         "Slack Socket Mode starting workspace=%s draft_requests=%s content_approval_mode=%s",
         deps.mapping.workspace_id, drafts is not None, drafts.approval_mode.value if drafts else "off",

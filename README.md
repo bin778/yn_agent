@@ -164,3 +164,15 @@ python -m bot.slack_app
 Slack에서 `/hermes-test status`를 실행한 뒤 `keyword`, `content`, `performance`, `data`
 테스트 카드를 확인합니다. 설정 및 직접 테스트 절차는
 [docs/phase3/slack_test_foundation.md](./docs/phase3/slack_test_foundation.md)를 참고하세요.
+
+
+## Slack 팀 브리핑
+
+`/hermes-team brief`는 하나의 스레드에 콘텐츠 제작팀, 데이터 분석팀, 퍼포먼스 마케팅팀의 결과를 모읍니다. Slack 앱에 운영 매니페스트의 명령을 등록하고 `SLACK_TEAM_BRIEFS_ENABLED=true`로 설정하면 `SLACK_DRAFT_CHANNEL_ID` 채널에서 사용할 수 있습니다.
+
+- 기본 요청은 합성 정상 데이터를 사용합니다. `/hermes-team brief critical`은 트래킹 이상 시나리오를 사용합니다. 팀 점검은 운영 트래킹 상태를 갱신하지 않습니다.
+- 키워드 카드에서 기존 역할과 위험도 정책에 따라 승인하면 같은 스레드에 검토용 초안이 올라옵니다. 높은 위험도에는 키워드 및 법무 역할의 서로 다른 승인자가 필요합니다.
+- 퍼포먼스 담당은 같은 브리핑의 트래킹 점검을 사용합니다. Critical, 개인정보 신호 또는 점검 실패 시 광고 제안을 보류합니다.
+- 팀 요청과 단계 실행 상태는 SQLite에 저장됩니다. Slack 전송에 실패해도 저장된 분석을 다시 실행하지 않습니다.
+
+로컬 검증은 `python -m unittest tests.test_slack_team -v`로 실행합니다.

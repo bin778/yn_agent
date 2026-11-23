@@ -697,7 +697,9 @@ def revise_pending_content(*, request_id: str, expected_version: int, actor: Act
 
 
 def claim_handoffs(handoff_type: str, *, limit: int = 10,
-                   db_path: str | Path | None = None) -> list[dict]:
+                   db_path: str | Path | None = None,
+                   team_brief_id: str | None = None) -> list[dict]:
+    """Team consumers hold an exclusive worker lock and can resume their own claim."""
     conn = get_conn(db_path)
     claimed: list[dict] = []
     try:
@@ -706,15 +708,21 @@ def claim_handoffs(handoff_type: str, *, limit: int = 10,
             """SELECT h.*, w.output_json, w.agent_id, w.routed_to
                FROM handoff_jobs h JOIN work_items w
                  ON w.work_item_id=h.work_item_id AND w.version=h.work_item_version
-               WHERE h.handoff_type=? AND h.status='pending'
-               ORDER BY h.created_at LIMIT ?""", (handoff_type, limit),
+               WHERE h.handoff_type=?
+                 AND (
+                   (? IS NULL AND h.status='pending' AND NOT EXISTS (
+                       SELECT 1 FROM team_briefs b WHERE b.brief_id=h.correlation_id
+                   ))
+                   OR (h.correlation_id=? AND h.status IN ('pending', 'claimed'))
+                 )
+               ORDER BY h.created_at LIMIT ?""", (handoff_type, team_brief_id, team_brief_id, limit),
         ).fetchall()
         for row in rows:
             token = str(uuid.uuid4())
             if conn.execute(
                 """UPDATE handoff_jobs SET status='claimed', claimed_at=?, claim_token=?
-                   WHERE handoff_id=? AND status='pending'""",
-                (utc_iso(), token, row["handoff_id"]),
+                   WHERE handoff_id=? AND status=?""",
+                (utc_iso(), token, row["handoff_id"], row["status"]),
             ).rowcount:
                 item = dict(row)
                 item["output"] = json.loads(item.pop("output_json"))
@@ -724,7 +732,7 @@ def claim_handoffs(handoff_type: str, *, limit: int = 10,
                 _audit(
                     conn, event_type="handoff.claimed", work=item,
                     actor_type="service", actor_id=f"consumer:{handoff_type}", platform="internal",
-                    previous_state="pending", new_state="claimed", reason=handoff_type,
+                    previous_state=row["status"], new_state="claimed", reason=handoff_type,
                     correlation_id=item["correlation_id"],
                 )
         conn.commit()

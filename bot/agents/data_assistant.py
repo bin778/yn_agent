@@ -25,8 +25,8 @@ from ..config import USE_FAKE_DATA
 AGENT_ID = "data_assistant"
 
 
-def _format_anomaly_history() -> str:
-    rows = recent_history(AGENT_ID, limit=5)
+def _format_anomaly_history(db_path=None) -> str:
+    rows = recent_history(AGENT_ID, limit=5, db_path=db_path)
     if not rows:
         return "(최근 이상탐지 이력 없음)"
     lines = []
@@ -84,7 +84,7 @@ def _classify_targets(result: DataAssistantOutput) -> list[str]:
     return ordered
 
 
-def run_anomaly_check(scenario: str = "critical") -> dict:
+def run_anomaly_check(scenario: str = "critical", *, db_path=None, record_work_item=None) -> dict:
     """
     routine.yaml continuous_tracking_check / 슬래시커맨드가 실행하는 작업.
     반환: {
@@ -100,9 +100,10 @@ def run_anomaly_check(scenario: str = "critical") -> dict:
     else:
         raw = get_fake_tracking_data(scenario)
 
+    record = record_work_item or create_work_item
     masked, pre_flags = _mask_pii(raw)
     system_prompt = build_system_prompt(AGENT_ID)
-    history_text = _format_anomaly_history()
+    history_text = _format_anomaly_history(db_path)
 
     user_prompt = f"""아래는 GA4/GTM 트래킹 스냅샷입니다 (이미 PII 마스킹 처리됨).
 SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세요.
@@ -133,19 +134,22 @@ SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세�
     targets = _classify_targets(result)
     routed_to = ",".join(targets)
 
-    workflow_ref = create_work_item(
+    workflow_ref = record(
         agent_id=AGENT_ID,
         output=result.model_dump(),
         routed_to=routed_to,
         model_version=get_model_identity(),
         input_summary=f"scenario={scenario}|status={result.status_summary}",
+        db_path=db_path,
     )
-    upsert_tracking_status(
-        result.status_summary,
-        result.model_dump(),
-        workflow_ref["work_item_id"],
-        workflow_ref["version"],
-    )
+    if record_work_item is None:
+        upsert_tracking_status(
+            result.status_summary,
+            result.model_dump(),
+            workflow_ref["work_item_id"],
+            workflow_ref["version"],
+            db_path=db_path,
+        )
 
     return {
         "item": result,

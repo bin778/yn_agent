@@ -48,7 +48,10 @@ def _draft_content(
     keyword_item: KeywordItem | dict,
     *,
     correlation_id: str | None = None,
+    work_item_id: str | None = None,
     db_path=None,
+    content_approval_mode: ContentApprovalMode = ContentApprovalMode.RISK_BASED,
+    collect_legal_claims: bool = False,
 ) -> dict:
     """
     키워드 1건으로 초안을 작성하고 라우팅한다.
@@ -58,6 +61,8 @@ def _draft_content(
     return _draft(
         "아래는 윤서진이 승인한 키워드 후보입니다.",
         "승인된 키워드 입력", payload, correlation_id=correlation_id, db_path=db_path,
+        work_item_id=work_item_id, content_approval_mode=content_approval_mode,
+        collect_legal_claims=collect_legal_claims,
     )
 
 

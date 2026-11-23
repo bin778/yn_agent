@@ -21,8 +21,8 @@ from ..workflow import create_work_item
 AGENT_ID = "keyword_analyst"
 
 
-def _format_history(agent_id: str) -> str:
-    rows = recent_history(agent_id, limit=5)
+def _format_history(agent_id: str, db_path=None) -> str:
+    rows = recent_history(agent_id, limit=5, db_path=db_path)
     if not rows:
         return "(최근 이력 없음 — 첫 실행이거나 아직 반려 사례가 없음)"
     lines = []
@@ -31,14 +31,15 @@ def _format_history(agent_id: str) -> str:
     return "\n".join(lines)
 
 
-def run_daily_keyword_scan() -> list[dict]:
+def run_daily_keyword_scan(*, db_path=None, record_work_item=None) -> list[dict]:
     """
     routine.yaml의 daily_keyword_scan 트리거가 실행하는 작업.
     반환값: [{"item", "target", "work_item_id", "version", "request_id"}, ...]
     """
+    record = record_work_item or create_work_item
     system_prompt = build_system_prompt(AGENT_ID)
     data = get_fake_search_data()
-    history_text = _format_history(AGENT_ID)
+    history_text = _format_history(AGENT_ID, db_path)
 
     user_prompt = f"""아래는 최근 검색 데이터입니다. SOUL.md의 판단 원칙과 컴플라이언스 규정에 따라
 각 항목의 urgency_level, compliance_risk를 판정하고 JSON으로 응답하세요.
@@ -61,12 +62,13 @@ def run_daily_keyword_scan() -> list[dict]:
         # config.md classify 규칙: compliance_risk == high → compliance_review.queue
         target = "compliance_review.queue" if item.compliance_risk == "high" else "content_editor.inbox"
 
-        workflow_ref = create_work_item(
+        workflow_ref = record(
             agent_id=AGENT_ID,
             output=item.model_dump(),
             routed_to=target,
             model_version=get_model_identity(),
             input_summary=item.keyword,
+            db_path=db_path,
         )
         routed_results.append({"item": item, "target": target, **workflow_ref})
 

@@ -437,10 +437,12 @@ class SlackDrafts(SlackApprovalCards):
             text="콘텐츠 초안을 만들지 못했습니다. 잠시 후 다시 요청해 주세요. 문제가 계속되면 관리자에게 알려 주세요.",
         )
 
-    def run(self, client, stop: Event) -> None:
+    def run(self, client, stop: Event, team_briefs=None) -> None:
         while not stop.is_set():
             try:
-                if self.process_next(client):
+                draft_worked = self.process_next(client)
+                team_worked = team_briefs is not None and team_briefs.process_next(client)
+                if draft_worked or team_worked:
                     continue
             except (OSError, sqlite3.Error) as exc:
                 LOGGER.warning("Slack draft worker storage failed error_type=%s", type(exc).__name__)

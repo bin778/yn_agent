@@ -55,6 +55,7 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
         "expired": "만료",
         "cancelled": "취소",
     }[state["status"]]
+    status = state.get("status_label", status)
     output = state["output"]
     subject = plain_draft_title(output["title"]) if is_content else output["keyword"]
     item_type = "합성 키워드 기반 콘텐츠 초안" if is_content else "합성 키워드"
@@ -75,6 +76,8 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
         f"만료: {expires_at}"
     )
     sections = [text]
+    if detail := state.get("detail"):
+        sections.append(detail[:2800])
     if is_content:
         flags = output.get("flagged_claims", []) + output.get("sensitive_flags", [])
         flags_text = f"위험 플래그: {', '.join(flags) or '없음'}"
@@ -100,7 +103,8 @@ def render_card(state: dict) -> tuple[str, list[dict]]:
                 "text": {"type": "plain_text", "text": "초안 수정"},
                 "value": value,
             })
-        blocks.append({"type": "actions", "elements": elements})
+        if elements:
+            blocks.append({"type": "actions", "elements": elements})
     if review_action:
         button = {
             "type": "button", "action_id": review_action,
@@ -145,7 +149,9 @@ class SlackApprovalCards:
     def _refresh_hint(self, subcommand: str, request_id: str) -> str:
         return ""
 
-    def _publish(self, client, team_id: str, channel_id: str, state: dict) -> None:
+    def _publish(
+        self, client, team_id: str, channel_id: str, state: dict, *, thread_ts: str | None = None,
+    ) -> None:
         request_id = state["request_id"]
         text, blocks = render_card(state)
         with closing(get_conn(self.db_path)) as conn:
@@ -156,8 +162,9 @@ class SlackApprovalCards:
             ).fetchone()
             if row is None:
                 # A post that succeeds before a binding failure has no actionable button.
+                thread = {"thread_ts": thread_ts} if thread_ts else {}
                 message = client.chat_postMessage(
-                    channel=channel_id,
+                    channel=channel_id, **thread,
                     text=f"{state.get('card_title', 'PHASE 4 개발 검증')} · 카드 준비 중 · 승인 요청 {request_id}",
                 )
                 message_ts = message["ts"]

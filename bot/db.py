@@ -85,6 +85,32 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             parent_version INTEGER,
             PRIMARY KEY (work_item_id, version)
         );
+        CREATE TABLE IF NOT EXISTS team_briefs (
+            brief_id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            tracking_scenario TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            message_ts TEXT,
+            sync_version INTEGER NOT NULL DEFAULT 1,
+            delivered_version INTEGER NOT NULL DEFAULT 0,
+            retry_at REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS team_brief_jobs (
+            brief_id TEXT NOT NULL REFERENCES team_briefs(brief_id),
+            stage TEXT NOT NULL CHECK (stage IN ('keyword', 'data', 'performance')),
+            status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'completed', 'failed')),
+            error TEXT,
+            PRIMARY KEY (brief_id, stage)
+        );
+        CREATE TABLE IF NOT EXISTS team_brief_replies (
+            brief_id TEXT NOT NULL REFERENCES team_briefs(brief_id),
+            reply_key TEXT NOT NULL,
+            message_ts TEXT NOT NULL,
+            PRIMARY KEY (brief_id, reply_key)
+        );
+        CREATE INDEX IF NOT EXISTS work_items_correlation ON work_items(correlation_id);
         CREATE TABLE IF NOT EXISTS approval_requests (
             request_id TEXT PRIMARY KEY,
             work_item_id TEXT NOT NULL,
@@ -158,6 +184,16 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             UNIQUE (work_item_id, work_item_version, handoff_type),
             FOREIGN KEY (work_item_id, work_item_version) REFERENCES work_items(work_item_id, version)
         );
+        CREATE TRIGGER IF NOT EXISTS team_brief_on_approval_status
+        AFTER UPDATE OF status ON approval_requests WHEN OLD.status != NEW.status
+        BEGIN
+            UPDATE team_briefs SET sync_version=sync_version+1 WHERE brief_id=NEW.correlation_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS team_brief_on_handoff_status
+        AFTER UPDATE OF status ON handoff_jobs WHEN OLD.status != NEW.status
+        BEGIN
+            UPDATE team_briefs SET sync_version=sync_version+1 WHERE brief_id=NEW.correlation_id;
+        END;
         CREATE TABLE IF NOT EXISTS manual_publications (
             handoff_id TEXT PRIMARY KEY REFERENCES handoff_jobs(handoff_id),
             publication_url TEXT NOT NULL,

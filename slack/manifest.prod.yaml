@@ -13,6 +13,10 @@ features:
     - command: /hermes-publish
       description: 승인된 콘텐츠와 수동 발행 기록을 확인합니다
       should_escape: false
+    - command: /hermes-team
+      description: 주간 콘텐츠·광고 브리핑을 요청합니다
+      usage_hint: brief [normal|critical]
+      should_escape: false
 oauth_config:
   scopes:
     bot:
