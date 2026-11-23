@@ -35,6 +35,9 @@ class SlackTeamTest(unittest.TestCase):
         self.client.chat_postMessage.side_effect = (
             lambda **kwargs: {"ts": f"1.{self.client.chat_postMessage.call_count}"}
         )
+        self.client.chat_getPermalink.side_effect = lambda channel, message_ts: {
+            "permalink": f"https://test.slack.com/archives/{channel}/p{message_ts.replace('.', '')}"
+        }
         fixtures = {
             "keyword_analyst": KeywordAnalystOutput(items=[{
                 "keyword": "상담 준비", "estimated_search_volume": 80, "intent_type": "Information",
@@ -84,6 +87,15 @@ class SlackTeamTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         return dict(rows[0])
 
+    def pm_card(self):
+        thread_ts = self.brief()["message_ts"]
+        return next(call.kwargs for call in reversed(self.client.chat_update.call_args_list)
+                    if call.kwargs["ts"] == thread_ts)
+
+    @staticmethod
+    def pm_action_text(report):
+        return "\n".join(block["text"]["text"] for block in report["blocks"][2:])
+
     def keyword_action(self, user, action_id="hermes_team_keyword_approve"):
         card = next(call.kwargs for call in self.client.chat_update.call_args_list
                     if any(el.get("action_id") == action_id
@@ -107,7 +119,14 @@ class SlackTeamTest(unittest.TestCase):
         self.submit()
         self.drain()
         brief = self.brief()
-        self.assertIn("키워드 승인 대기", self.client.chat_update.call_args_list[-2].kwargs["text"])
+        report = self.pm_card()
+        self.assertIn("키워드 승인 대기", report["text"])
+        keyword_card = next(
+            call.kwargs for call in self.client.chat_update.call_args_list
+            if "윤서진 · 키워드 후보" in call.kwargs["text"]
+        )
+        keyword_url = f"https://test.slack.com/archives/CCHANNEL/p{keyword_card['ts'].replace('.', '')}"
+        self.assertIn(f"<{keyword_url}|카드 열기>", self.pm_action_text(report))
         self.assertIsNone(get_tracking_status(self.db))
         model = self.models["content_editor"]
         model.assert_not_called()
@@ -129,6 +148,10 @@ class SlackTeamTest(unittest.TestCase):
         report = next(call.kwargs["text"] for call in reversed(self.client.chat_update.call_args_list)
                       if call.kwargs["ts"] == brief["message_ts"])
         self.assertIn("법무 승인 대기 1건", report)
+        pm_actions = self.pm_action_text(self.pm_card())
+        self.assertIn("별도 법무 승인 1건", pm_actions)
+        self.assertIn(f"<{keyword_url}|카드 열기>", pm_actions)
+        self.assertNotIn("키워드 승인 1건", pm_actions)
 
         self.assertIn("초안 작업을 대기열", self.keyword_action("ULEGAL"))
         # Simulate the worker dying after claiming the approved handoff.
@@ -151,6 +174,7 @@ class SlackTeamTest(unittest.TestCase):
                           if call.kwargs["ts"] == brief["message_ts"]]
         self.assertIn("초안 1건", parent_updates[-1])
         self.assertIn("개선안 1건", parent_updates[-1])
+        self.assertIn("검토용 초안 확인 1건", self.pm_action_text(self.pm_card()))
 
     def test_advisory_approval_creates_generalized_draft_with_separate_legal_approval(self):
         content_mode = workflow.ContentApprovalMode.SINGLE
@@ -238,6 +262,9 @@ class SlackTeamTest(unittest.TestCase):
         keyword = next(item for item in items if item["agent_id"] == "keyword_analyst")
         self.assertEqual(keyword["status"], "rejected")
         self.assertEqual(handoffs, [])
+        self.drain()
+        self.assertIn("반려 1건", self.pm_card()["text"])
+        self.assertNotIn("키워드 승인 1건", self.pm_action_text(self.pm_card()))
 
     def test_critical_branch_blocks_ads_and_leaves_global_tracking_untouched(self):
         work = workflow.create_work_item(
@@ -258,6 +285,21 @@ class SlackTeamTest(unittest.TestCase):
                    if call.kwargs["ts"] == brief["message_ts"]]
         self.assertIn("퍼포먼스 마케팅팀 · 보류", reports[-1])
         self.assertIn("키워드 승인 대기", reports[-1])
+        actions = self.pm_action_text(self.pm_card())
+        self.assertIn("전환 추적 점검 확인 1건", actions)
+        self.assertIn("광고 보류 사유 확인 1건", actions)
+        self.assertNotIn("광고 개선안 검토", actions)
+
+    def test_pm_status_is_delivered_when_slack_cannot_return_a_message_link(self):
+        self.client.chat_getPermalink.side_effect = OSError("simulated link lookup failure")
+        self.submit()
+        self.drain()
+        brief = self.brief()
+        self.assertEqual(brief["sync_version"], brief["delivered_version"])
+        actions = self.pm_action_text(self.pm_card())
+        self.assertIn("키워드 승인 1건", actions)
+        self.assertIn("링크가 없는 항목은 이 스레드에서 확인", actions)
+        self.assertNotIn("|카드 열기>", actions)
 
     def test_slack_retry_does_not_repeat_analysis(self):
         self.client.chat_update.side_effect = RuntimeError("simulated delivery error")

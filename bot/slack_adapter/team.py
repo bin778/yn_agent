@@ -6,8 +6,12 @@ import fcntl
 import logging
 import sqlite3
 import time
+from collections import Counter
 from contextlib import closing
+from functools import lru_cache
 from html import escape
+
+from slack_sdk.errors import SlackClientError
 
 from .. import workflow
 from ..db import get_conn, get_work_item
@@ -30,64 +34,123 @@ ROLE_LABELS = {
 STAGE_LABELS = {"queued": "대기", "failed": "실패", "completed": "완료"}
 
 
-def _report(jobs, items, handoffs) -> str:
+def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
     keywords = [item for item in items if item["agent_id"] == AGENTS["keyword"]]
     pending = [item for item in keywords if item["status"] == "pending_approval"]
-    legal_pending = sum(item["policy_key"] == "keyword_high" and item["keyword_approved"] for item in pending)
-    pending_keywords = len(pending) - legal_pending
-    advisory = sum(
-        item["policy_key"] == "keyword_high_advisory"
+    legal_pending = [
+        item for item in pending if item["policy_key"] == "keyword_high" and item["keyword_approved"]
+    ]
+    legal_ids = {item["work_item_id"] for item in legal_pending}
+    keyword_pending = [item for item in pending if item["work_item_id"] not in legal_ids]
+    advisory = [
+        item for item in keywords if item["policy_key"] == "keyword_high_advisory"
         and item["status"] in {"pending_approval", "approved"}
-        for item in keywords
-    )
-    drafts = sum(item["agent_id"] == "content_editor" for item in items)
+    ]
+    drafts = [item for item in items if item["agent_id"] == "content_editor"]
     draft_waiting = sum(item["status"] in {"pending", "claimed"} for item in handoffs)
     draft_failed = sum(item["status"] == "failed" for item in handoffs)
-    content = []
-    if drafts:
-        content.append(f"초안 {drafts}건")
-    if pending_keywords:
-        content.append(f"키워드 승인 대기 {pending_keywords}건")
-    if legal_pending:
-        content.append(f"법무 승인 대기 {legal_pending}건")
-    if advisory:
-        content.append(f"법무 검토 권고 {advisory}건")
-    if draft_waiting:
-        content.append(f"초안 작업 대기 {draft_waiting}건")
-    if draft_failed:
-        content.append(f"초안 실패 {draft_failed}건")
+    counts = Counter(item["status"] for item in keywords)
+    content = [
+        f"{label} {count}건"
+        for label, count in (
+            ("키워드 승인 대기", len(keyword_pending)),
+            ("법무 승인 대기", len(legal_pending)),
+            ("법무 검토 권고", len(advisory)),
+            ("반려", counts["rejected"]),
+            ("만료", counts["expired"]),
+            ("취소", counts["cancelled"]),
+            ("초안", len(drafts)),
+            ("초안 작업 대기", draft_waiting),
+            ("초안 실패", draft_failed),
+        )
+        if count
+    ]
     if not content:
-        if any(item["agent_id"] == AGENTS["keyword"] for item in items):
+        if keywords:
             content.append("선택된 키워드 없음")
         elif jobs["keyword"]["status"] == "completed":
             content.append("키워드 후보 없음")
         else:
             content.append(f"키워드 분석 {STAGE_LABELS[jobs['keyword']['status']]}")
+
     data = next((item for item in items if item["agent_id"] == AGENTS["data"]), None)
     data_status = STAGE_LABELS[jobs["data"]["status"]]
+    tracking_review = []
     if data:
-        data_status = f"{data['output']['status_summary']} · {seoul_time_label(data['created_at'])}"
+        status = data["output"]["status_summary"]
+        data_status = f"{status} · {seoul_time_label(data['created_at'])}"
+        if data["status"] == "acknowledgement_pending" or status == "Critical":
+            tracking_review.append(data)
+
     performance = [item for item in items if item["agent_id"] == AGENTS["performance"]]
+    halted = [item for item in performance if item["output"].get("halted")]
+    proposals = [item for item in performance if item["status"] == "pending_approval"]
     ads = STAGE_LABELS[jobs["performance"]["status"]]
-    if performance and performance[0]["output"].get("halted"):
-        ads = "보류 · " + performance[0]["output"]["reason"][:350]
+    if halted:
+        ads = "보류 · " + halted[0]["output"]["reason"][:350]
     elif performance:
         ads = f"개선안 {len(performance)}건"
     elif jobs["performance"]["status"] == "completed":
         ads = "개선안 없음"
-    next_actions = []
-    if pending_keywords:
-        next_actions.append("제작할 키워드를 승인해 주세요.")
-    if legal_pending:
-        next_actions.append("고위험 후보는 별도의 법무 승인자가 확인해 주세요.")
-    next_action = " ".join(next_actions) or "직원별 산출물과 근거는 이 메시지의 스레드에서 확인할 수 있습니다."
-    return "\n".join([
-        TITLE,
+
+    summary = "\n".join([
         f"콘텐츠 제작팀 · {' / '.join(content)}",
         f"데이터 분석팀 · {data_status}",
         f"퍼포먼스 마케팅팀 · {ads}",
-        f"확인할 일 · {next_action}" if next_actions else next_action,
     ])
+    actions = [
+        (label, candidates)
+        for label, candidates in (
+            ("키워드 승인", keyword_pending),
+            ("별도 법무 승인", legal_pending),
+            ("법무 검토 권고 확인", [item for item in advisory if item["status"] == "approved"]),
+            ("검토용 초안 확인", [item for item in drafts if item["status"] == "pending_approval"]),
+            ("전환 추적 점검 확인", tracking_review),
+            ("광고 보류 사유 확인", halted),
+            ("광고 개선안 검토", proposals),
+        )
+        if candidates
+    ]
+    fallback = f"{TITLE}\n{summary}"
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": TITLE}},
+        _section(summary),
+    ]
+    if actions:
+        labels = " · ".join(f"{label} {len(candidates)}건" for label, candidates in actions)
+        fallback += f"\n다음 행동 · {labels}"
+        blocks.append(_section("다음 행동"))
+        missing_link = False
+        for label, candidates in actions:
+            blocks.append(_section(f"{label} {len(candidates)}건"))
+            for item in candidates[:3]:
+                output = item["output"]
+                title = output.get("keyword") or output.get("title") or output.get("status_summary") or "보류 상세"
+                title = " ".join(title.split())[:180]
+                url = permalink(item["work_item_id"]) if permalink else None
+                if url:
+                    blocks.append({"type": "section", "text": {
+                        "type": "mrkdwn", "verbatim": True,
+                        "text": f"{escape(title, quote=False)} · <{url}|카드 열기>",
+                    }})
+                else:
+                    blocks.append(_section(title))
+                    missing_link = True
+            if len(candidates) > 3:
+                blocks.append(_section(f"나머지 {len(candidates) - 3}건은 스레드에서 확인할 수 있습니다."))
+        if permalink and missing_link:
+            blocks.append(_section("링크가 없는 항목은 이 스레드에서 확인할 수 있습니다."))
+    elif draft_waiting:
+        fallback += "\n다음 행동 · 초안이 작성되면 스레드에서 확인해 주세요."
+        blocks.append(_section("초안이 작성되면 스레드에서 확인해 주세요."))
+    elif draft_failed or any(job["status"] == "failed" for job in jobs.values()):
+        fallback += "\n다음 행동 · 실패한 작업 상태를 확인해 주세요."
+        blocks.append(_section("실패한 작업 상태를 확인해 주세요."))
+    return escape(fallback, quote=False), blocks
+
+
+def _section(text: str) -> dict:
+    return {"type": "section", "text": {"type": "plain_text", "text": text}}
 
 
 def _detail(item: dict) -> str:
@@ -257,19 +320,20 @@ class SlackTeamBriefs(SlackApprovalCards):
     def _sync(self, client, brief: dict) -> None:
         brief_id, channel_id = brief["brief_id"], brief["channel_id"]
         jobs, items, handoffs = self.team.snapshot(brief_id)
-        report = _report(jobs, items, handoffs)
         thread_ts = brief["message_ts"]
-        if thread_ts is None:
-            message = client.chat_postMessage(channel=channel_id, text=escape(report, quote=False))
+        new_report = thread_ts is None
+        if new_report:
+            text, blocks = _report(jobs, items, handoffs)
+            message = client.chat_postMessage(channel=channel_id, text=text, blocks=blocks)
             thread_ts = message["ts"]
             with closing(get_conn(self.db_path)) as conn, conn:
                 conn.execute("UPDATE team_briefs SET message_ts=? WHERE brief_id=?", (thread_ts, brief_id))
-        else:
-            client.chat_update(channel=channel_id, ts=thread_ts, text=escape(report, quote=False))
+        message_ids = {}
         for item in items:
+            work_id = item["work_item_id"]
             if item["agent_id"] == AGENTS["keyword"]:
                 state = self._state(item["request_id"])
-                self._publish(client, brief["team_id"], channel_id, state, thread_ts=thread_ts)
+                message_ts = self._publish(client, brief["team_id"], channel_id, state, thread_ts=thread_ts)
             elif item["agent_id"] == "content_editor":
                 state = workflow.get_approval_state(item["request_id"], self.db_path)
                 text, blocks = render_card({
@@ -282,23 +346,46 @@ class SlackTeamBriefs(SlackApprovalCards):
                     "status_label": "브리핑용 초안 작성 완료",
                     "expiry_label": seoul_time_label(state["expires_at"]),
                 })
-                self._reply(client, brief, thread_ts, item["work_item_id"], text, blocks=blocks)
+                message_ts = self._reply(client, brief, thread_ts, work_id, text, blocks=blocks)
             else:
                 text = escape(_detail(item)[:2800], quote=False)
-                self._reply(client, brief, thread_ts, item["work_item_id"], text)
+                message_ts = self._reply(client, brief, thread_ts, work_id, text)
+            message_ids[work_id] = message_ts
+        if not new_report or message_ids:
+            text, blocks = _report(
+                jobs, items, handoffs,
+                permalink=lambda work_id: self._message_link(client, channel_id, message_ids[work_id]),
+            )
+            client.chat_update(channel=channel_id, ts=thread_ts, text=text, blocks=blocks)
         with closing(get_conn(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE team_briefs SET delivered_version=?, retry_at=0 WHERE brief_id=?",
                 (brief["sync_version"], brief_id),
             )
 
-    def _reply(self, client, brief, thread_ts, key, text, **kwargs):
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def _permalink(client, channel_id: str, message_ts: str) -> str:
+        return client.chat_getPermalink(channel=channel_id, message_ts=message_ts)["permalink"]
+
+    def _message_link(self, client, channel_id: str, message_ts: str) -> str | None:
+        try:
+            url = self._permalink(client, channel_id, message_ts)
+        except (SlackClientError, KeyError, OSError) as exc:
+            LOGGER.warning("Brief message link unavailable error_type=%s", type(exc).__name__)
+            return None
+        if isinstance(url, str) and url.startswith("https://") and not any(c in url for c in "<>|"):
+            return escape(url, quote=False)
+        return None
+
+    def _reply(self, client, brief, thread_ts, key, text, **kwargs) -> str:
         brief_id = brief["brief_id"]
         with closing(get_conn(self.db_path)) as conn:
-            if conn.execute(
-                "SELECT 1 FROM team_brief_replies WHERE brief_id=? AND reply_key=?", (brief_id, key),
-            ).fetchone():
-                return
+            existing = conn.execute(
+                "SELECT message_ts FROM team_brief_replies WHERE brief_id=? AND reply_key=?", (brief_id, key),
+            ).fetchone()
+            if existing:
+                return existing["message_ts"]
             message = client.chat_postMessage(
                 channel=brief["channel_id"], thread_ts=thread_ts, text=text, **kwargs,
             )
@@ -307,3 +394,4 @@ class SlackTeamBriefs(SlackApprovalCards):
                     "INSERT INTO team_brief_replies (brief_id, reply_key, message_ts) VALUES (?, ?, ?)",
                     (brief_id, key, message["ts"]),
                 )
+            return message["ts"]

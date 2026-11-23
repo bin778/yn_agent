@@ -154,7 +154,7 @@ class SlackApprovalCards:
 
     def _publish(
         self, client, team_id: str, channel_id: str, state: dict, *, thread_ts: str | None = None,
-    ) -> None:
+    ) -> str:
         request_id = state["request_id"]
         text, blocks = render_card(state)
         with closing(get_conn(self.db_path)) as conn:
@@ -180,6 +180,7 @@ class SlackApprovalCards:
             else:
                 message_ts = row["message_ts"]
         client.chat_update(channel=channel_id, ts=message_ts, text=text, blocks=blocks)
+        return message_ts
 
     @staticmethod
     def _update(client, channel_id: str, message_ts: str, state: dict) -> None:
