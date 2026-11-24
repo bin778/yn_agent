@@ -34,7 +34,7 @@ from .legal_evidence import register_legal_evidence_handlers
 from .publish import register_publish_handlers
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
 from .team import COMMAND as TEAM_COMMAND
-from .team import DRAFT_RETRY_ACTION, SlackTeamBriefs
+from .team import DRAFT_RETRY_ACTION, PERFORMANCE_RETRY_ACTION, SlackTeamBriefs
 
 
 LOGGER = logging.getLogger("hermes.slack")
@@ -410,6 +410,10 @@ def register_handlers(
         @app.action(DRAFT_RETRY_ACTION)
         def _team_draft_retry(ack, body, action, respond):
             team_briefs.handle_draft_retry(ack=ack, body=body, action=action, respond=respond)
+
+        @app.action(PERFORMANCE_RETRY_ACTION)
+        def _team_performance_retry(ack, body, action, respond):
+            team_briefs.handle_performance_retry(ack=ack, body=body, action=action, respond=respond)
 
     def _action(ack, body, action, respond, client):
         handle_action(

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import DB_PATH
 
-DRAFT_TIMEOUT_ERROR = "CodexTimeoutError"
+CODEX_TIMEOUT_ERROR = "CodexTimeoutError"
 
 
 def utc_now() -> dt.datetime:
@@ -87,8 +87,27 @@ def _refresh_legacy_draft_timeout_cards(conn: sqlite3.Connection) -> None:
                 SELECT correlation_id FROM handoff_jobs
                 WHERE handoff_type='draft_content' AND status='failed' AND error=?
             )
-        """, (DRAFT_TIMEOUT_ERROR,))
+        """, (CODEX_TIMEOUT_ERROR,))
         conn.execute("PRAGMA user_version = 1")
+
+
+def _ensure_performance_retry(conn: sqlite3.Connection) -> None:
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 2:
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= 2:
+            return
+        if not any(row["name"] == "retry_count" for row in conn.execute("PRAGMA table_info(team_brief_jobs)")):
+            conn.execute("ALTER TABLE team_brief_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        conn.execute("""
+            UPDATE team_briefs SET sync_version=sync_version+1
+            WHERE message_ts IS NOT NULL AND brief_id IN (
+                SELECT brief_id FROM team_brief_jobs
+                WHERE stage='performance' AND status='failed' AND error=?
+            )
+        """, (CODEX_TIMEOUT_ERROR,))
+        conn.execute("PRAGMA user_version = 2")
 
 
 def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
@@ -137,6 +156,7 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             stage TEXT NOT NULL CHECK (stage IN ('keyword', 'data', 'performance')),
             status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'completed', 'failed')),
             error TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (brief_id, stage)
         );
         CREATE TABLE IF NOT EXISTS team_brief_replies (
@@ -411,6 +431,7 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
         _ensure_legal_evidence_schema(conn)
         _ensure_team_brief_approval_mode(conn)
         _refresh_legacy_draft_timeout_cards(conn)
+        _ensure_performance_retry(conn)
     except sqlite3.Error:
         conn.close()
         raise

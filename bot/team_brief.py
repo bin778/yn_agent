@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from contextlib import closing
 from pathlib import Path
 
 from . import workflow
 from .agents import content_editor, data_assistant, keyword_analyst, performance_analyst
-from .db import get_conn, get_work_item, utc_iso
+from .db import CODEX_TIMEOUT_ERROR, get_conn, get_work_item, utc_iso
 from .schemas import DRAFT_TOPICS
 
 LOGGER = logging.getLogger(__name__)
@@ -58,6 +59,29 @@ class TeamBriefs:
                 (brief_id, self.team_id, self.channel_id),
             ).fetchone()
         return dict(row) if row else None
+
+    def retry_performance_timeout(
+        self, *, brief_id: str, message_ts: str, retry_count: int, actor: workflow.ActorContext,
+    ) -> bool:
+        if not actor.verified or not actor.actor_id:
+            raise workflow.AuthorizationError("verified actor required")
+        with closing(get_conn(self.db_path)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                """UPDATE team_brief_jobs SET status='queued', error=NULL, retry_count=retry_count+1
+                   WHERE brief_id=? AND stage='performance' AND status='failed' AND error=? AND retry_count=?
+                     AND EXISTS (
+                         SELECT 1 FROM team_briefs b WHERE b.brief_id=team_brief_jobs.brief_id
+                         AND b.team_id=? AND b.channel_id=? AND b.message_ts=? AND (b.user_id=? OR ?)
+                     )""",
+                (brief_id, CODEX_TIMEOUT_ERROR, retry_count, self.team_id, self.channel_id, message_ts,
+                 actor.actor_id, bool(actor.roles & {"performance_approver", "workflow_admin"})),
+            ).rowcount
+            if updated:
+                self._mark_dirty(conn, brief_id)
+        if updated:
+            LOGGER.info("Brief performance retry requested brief_id=%s attempt=%s", brief_id, retry_count + 1)
+        return bool(updated)
 
     def snapshot(self, brief_id: str) -> tuple[dict[str, dict], list[dict], list[dict]]:
         with closing(get_conn(self.db_path)) as conn, conn:
@@ -115,6 +139,7 @@ class TeamBriefs:
 
     def _analyze(self, job: dict) -> None:
         brief_id, stage = job["brief_id"], job["stage"]
+        started = time.monotonic()
         pending = []
         error = None
 
@@ -154,14 +179,19 @@ class TeamBriefs:
             conn.execute("BEGIN IMMEDIATE")
             updated = conn.execute(
                 """UPDATE team_brief_jobs SET status=?, error=?
-                   WHERE brief_id=? AND stage=? AND status='queued'""",
-                ("failed" if error else "completed", error, brief_id, stage),
+                   WHERE brief_id=? AND stage=? AND status='queued' AND retry_count=?""",
+                ("failed" if error else "completed", error, brief_id, stage, job["retry_count"]),
             ).rowcount
             if updated:
                 if error is None:
                     for fields in pending:
                         workflow._insert_work_item(conn, correlation_id=brief_id, **fields)
                 self._mark_dirty(conn, brief_id)
+        if stage == "performance" and updated:
+            LOGGER.info(
+                "Brief performance finished brief_id=%s attempt=%s elapsed_ms=%d error_type=%s",
+                brief_id, job["retry_count"], (time.monotonic() - started) * 1000, error or "-",
+            )
 
     def _draft(self, brief_id: str) -> None:
         handoffs = workflow.claim_handoffs(

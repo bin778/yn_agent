@@ -15,7 +15,7 @@ from html import escape
 from slack_sdk.errors import SlackClientError
 
 from .. import workflow
-from ..db import DRAFT_TIMEOUT_ERROR, get_conn, get_work_item
+from ..db import CODEX_TIMEOUT_ERROR, get_conn, get_work_item
 from ..slack_approval_demo import COMMAND as KEYWORD_CARD, CONTENT_COMMAND, SlackApprovalCards, render_card
 from ..schemas import DRAFT_TOPICS
 from ..team_brief import AGENTS, TeamBriefs
@@ -25,6 +25,7 @@ from .drafts import REQUEST_ROLES
 
 COMMAND = "/hermes-team"
 DRAFT_RETRY_ACTION = "hermes_team_draft_retry"
+PERFORMANCE_RETRY_ACTION = "hermes_team_performance_retry"
 LOGGER = logging.getLogger(__name__)
 TITLE = "Hermes · 주간 콘텐츠·광고 브리핑 · 합성 데이터"
 REQUESTOR_ROLES = REQUEST_ROLES | {"data_owner", "performance_approver"}
@@ -58,7 +59,7 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
     timed_out = [
         (approved_keywords[key], handoff)
         for handoff in handoffs
-        if handoff["status"] == "failed" and handoff["error"] == DRAFT_TIMEOUT_ERROR
+        if handoff["status"] == "failed" and handoff["error"] == CODEX_TIMEOUT_ERROR
         and handoff["claim_token"]
         and (key := (handoff["work_item_id"], handoff["work_item_version"])) in approved_keywords
     ]
@@ -98,13 +99,21 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
     performance = [item for item in items if item["agent_id"] == AGENTS["performance"]]
     halted = [item for item in performance if item["output"].get("halted")]
     proposals = [item for item in performance if item["status"] == "pending_approval"]
-    ads = STAGE_LABELS[jobs["performance"]["status"]]
+    performance_job = jobs["performance"]
+    performance_timeout = (
+        performance_job["status"] == "failed" and performance_job["error"] == CODEX_TIMEOUT_ERROR
+    )
+    ads = STAGE_LABELS[performance_job["status"]]
     if halted:
         ads = "보류 · " + halted[0]["output"]["reason"][:350]
     elif performance:
         ads = f"개선안 {len(performance)}건"
-    elif jobs["performance"]["status"] == "completed":
+    elif performance_job["status"] == "completed":
         ads = "개선안 없음"
+    elif performance_timeout:
+        ads = "광고 분석 시간 초과"
+    elif performance_job["status"] == "queued" and performance_job["retry_count"]:
+        ads = "광고 분석 재시도 접수"
 
     summary = "\n".join([
         f"콘텐츠 제작팀 · {' / '.join(content)}",
@@ -129,12 +138,23 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
         {"type": "header", "text": {"type": "plain_text", "text": TITLE}},
         _section(summary),
     ]
-    if actions or timed_out:
+    if actions or timed_out or performance_timeout:
         labels = [f"{label} {len(candidates)}건" for label, candidates in actions]
         if timed_out:
             labels.append(f"초안 생성 시간 초과 {len(timed_out)}건")
+        if performance_timeout:
+            labels.append("광고 분석 재시도")
         fallback += "\n다음 행동 · " + " · ".join(labels)
         blocks.append(_section("다음 행동"))
+        if performance_timeout:
+            blocks.append({
+                **_section("광고 분석 시간 초과 · 이 브리핑의 광고 분석을 다시 실행할 수 있습니다."),
+                "accessory": {
+                    "type": "button", "action_id": PERFORMANCE_RETRY_ACTION,
+                    "text": {"type": "plain_text", "text": "광고 분석 재시도"},
+                    "value": f"{performance_job['brief_id']}:{performance_job['retry_count']}",
+                },
+            })
         missing_link = False
         for label, candidates in actions:
             blocks.append(_section(f"{label} {len(candidates)}건"))
@@ -335,6 +355,30 @@ class SlackTeamBriefs(SlackApprovalCards):
             feedback = "최신 PM 카드에서 초안 재시도를 눌러 주세요."
         except sqlite3.Error as exc:
             LOGGER.warning("Brief draft retry enqueue failed error_type=%s", type(exc).__name__)
+            feedback = "재시도를 등록하지 못했습니다. 잠시 후 다시 시도해 주세요."
+        respond(response_type="ephemeral", replace_original=False, text=feedback)
+
+    def handle_performance_retry(self, *, ack, body: dict, action: dict, respond) -> None:
+        ack()
+        try:
+            actor = self._actor(body["team"]["id"], body["channel"]["id"], body["user"]["id"])
+            if not actor.roles & REQUESTOR_ROLES:
+                raise workflow.AuthorizationError("team brief request role is missing")
+            raw_id, raw_count = action["value"].split(":")
+            queued = self.team.retry_performance_timeout(
+                brief_id=str(uuid.UUID(raw_id)), message_ts=body["message"]["ts"],
+                retry_count=int(raw_count), actor=actor,
+            )
+            feedback = (
+                "광고 분석 재시도를 등록했습니다. 같은 스레드에서 결과를 확인할 수 있습니다."
+                if queued else "재시도할 수 있는 최신 카드인지 확인해 주세요. 브리핑 요청자나 광고 승인 권한자가 재시도할 수 있습니다."
+            )
+        except (SlackConfigurationError, workflow.AuthorizationError):
+            feedback = "이 채널에서 광고 분석을 재시도할 권한이 필요합니다."
+        except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+            feedback = "최신 PM 카드에서 광고 분석 재시도를 눌러 주세요."
+        except sqlite3.Error as exc:
+            LOGGER.warning("Brief performance retry enqueue failed error_type=%s", type(exc).__name__)
             feedback = "재시도를 등록하지 못했습니다. 잠시 후 다시 시도해 주세요."
         respond(response_type="ephemeral", replace_original=False, text=feedback)
 

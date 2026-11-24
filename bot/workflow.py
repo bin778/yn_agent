@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 from urllib.parse import urlsplit
 
-from .db import DRAFT_TIMEOUT_ERROR, get_conn, utc_iso, utc_now
+from .db import CODEX_TIMEOUT_ERROR, get_conn, utc_iso, utc_now
 
 Decision = Literal["approved", "rejected", "revision_requested"]
 
@@ -752,7 +752,7 @@ def retry_team_draft_timeout(
                      SELECT 1 FROM work_items newer
                      WHERE newer.work_item_id=w.work_item_id AND newer.version>w.version
                  )""",
-            (team_id, channel_id, message_ts, handoff_id, claim_token, DRAFT_TIMEOUT_ERROR),
+            (team_id, channel_id, message_ts, handoff_id, claim_token, CODEX_TIMEOUT_ERROR),
         ).fetchone()
         if handoff is None:
             return False
@@ -764,7 +764,7 @@ def retry_team_draft_timeout(
         _audit(
             conn, event_type="handoff.retry_requested", work=dict(handoff),
             actor_type="human", actor_id=actor.actor_id, platform=actor.platform,
-            previous_state="failed", new_state="pending", reason=DRAFT_TIMEOUT_ERROR,
+            previous_state="failed", new_state="pending", reason=CODEX_TIMEOUT_ERROR,
             correlation_id=handoff["correlation_id"],
         )
     return True

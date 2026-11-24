@@ -11,7 +11,7 @@ from bot.llm_client import CodexTimeoutError
 from bot.schemas import DataAssistantOutput, KeywordAnalystOutput, PerformanceAnalystOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
 from bot.slack_adapter.config import SlackMapping, SlackSettings
-from bot.slack_adapter.team import COMMAND, DRAFT_RETRY_ACTION, SlackTeamBriefs
+from bot.slack_adapter.team import COMMAND, DRAFT_RETRY_ACTION, PERFORMANCE_RETRY_ACTION, SlackTeamBriefs
 
 
 class SlackTeamTest(unittest.TestCase):
@@ -326,6 +326,74 @@ class SlackTeamTest(unittest.TestCase):
         self.assertIn("상담 준비 · 초안 생성 시간 초과", self.pm_action_text(self.pm_card()))
         self.assertFalse(self.new_worker().process_next(self.client))
         self.models["content_editor"].assert_called_once()
+
+    def performance_retry_value(self):
+        return next(
+            (block["accessory"]["value"] for block in self.pm_card()["blocks"]
+             if block.get("accessory", {}).get("action_id") == PERFORMANCE_RETRY_ACTION),
+            None,
+        )
+
+    def click_performance_retry(self, value, *, user="UKEYWORD", message_ts=None):
+        ack, respond = Mock(), Mock()
+        self.actions[PERFORMANCE_RETRY_ACTION](
+            ack=ack, respond=respond, action={"value": value},
+            body={"team": {"id": "TTEAM"}, "channel": {"id": "CCHANNEL"}, "user": {"id": user},
+                  "message": {"ts": message_ts or self.brief()["message_ts"]}},
+        )
+        ack.assert_called_once()
+        return respond.call_args.kwargs["text"]
+
+    def test_performance_retry_refreshes_legacy_card_and_only_retries_the_selected_attempt(self):
+        model = self.models["performance_analyst"]
+        model.side_effect = [CodexTimeoutError(), CodexTimeoutError(), model.return_value]
+        self.submit()
+        self.drain()
+        before = self.brief()
+        with closing(get_conn(self.db)) as conn, conn:
+            conn.execute("ALTER TABLE team_brief_jobs DROP COLUMN retry_count")
+            conn.execute("PRAGMA user_version=1")
+        self.drain(self.new_worker())
+        self.assertEqual(self.brief()["sync_version"], before["sync_version"] + 1)
+        self.assertIn("광고 분석 시간 초과", self.pm_card()["text"])
+        first = self.performance_retry_value()
+        self.assertIsNotNone(first)
+        self.assertIn("최신 카드", self.click_performance_retry(first, user="UCONTENT"))
+        self.assertIn("최신 카드", self.click_performance_retry(first, message_ts="1.99"))
+        self.assertIn("재시도를 등록했습니다", self.click_performance_retry(first))
+        self.assertIn("최신 카드", self.click_performance_retry(first))
+        self.drain()
+        second = self.performance_retry_value()
+        self.assertNotEqual(first, second)
+        self.assertIn("최신 카드", self.click_performance_retry(first))
+        self.assertIn("재시도를 등록했습니다", self.click_performance_retry(second))
+        self.drain()
+
+        self.assertEqual(model.call_count, 3)
+        self.assertIsNone(self.performance_retry_value())
+        self.assertIn("개선안 1건", self.pm_card()["text"])
+        replies = [call.kwargs for call in self.client.chat_postMessage.call_args_list
+                   if "김도현 · 광고 개선안" in call.kwargs["text"]]
+        self.assertEqual([reply["thread_ts"] for reply in replies], [before["message_ts"]])
+        for name in ("keyword_analyst", "data_assistant"):
+            self.models[name].assert_called_once()
+        self.models["content_editor"].assert_not_called()
+
+    def test_performance_retry_reapplies_tracking_gate(self):
+        model = self.models["performance_analyst"]
+        model.side_effect = CodexTimeoutError()
+        self.submit()
+        self.drain()
+        value = self.performance_retry_value()
+        self.assertIsNotNone(value)
+        with closing(get_conn(self.db)) as conn, conn:
+            conn.execute("UPDATE work_items SET output_json=json_set(output_json, '$.status_summary', 'Critical')"
+                         " WHERE agent_id='data_assistant'")
+        self.assertIn("재시도를 등록했습니다", self.click_performance_retry(value))
+        self.drain()
+        model.assert_called_once()
+        self.assertIn("퍼포먼스 마케팅팀 · 보류", self.pm_card()["text"])
+        self.assertIsNone(self.performance_retry_value())
 
     def test_reject_feedback_and_no_draft_handoff(self):
         self.submit()
