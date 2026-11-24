@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 from urllib.parse import urlsplit
 
-from .db import get_conn, utc_iso, utc_now
+from .db import DRAFT_TIMEOUT_ERROR, get_conn, utc_iso, utc_now
 
 Decision = Literal["approved", "rejected", "revision_requested"]
 
@@ -729,6 +729,45 @@ def revise_pending_content(*, request_id: str, expected_version: int, actor: Act
             parent_version=expected_version, creation_reason=reason, now=now, editor=actor,
             content_approval_mode=approval_mode,
         )
+
+
+def retry_team_draft_timeout(
+    *, actor: ActorContext, team_id: str, channel_id: str, message_ts: str,
+    handoff_id: str, claim_token: str, db_path: str | Path | None = None,
+) -> bool:
+    _require_actor(actor)
+    if "keyword_approver" not in actor.roles:
+        raise AuthorizationError("keyword approver role required")
+    with closing(get_conn(db_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        handoff = conn.execute(
+            """SELECT h.*, w.version, w.agent_id, w.model_version
+               FROM handoff_jobs h
+               JOIN team_briefs b ON b.brief_id=h.correlation_id
+               JOIN work_items w ON w.work_item_id=h.work_item_id AND w.version=h.work_item_version
+               WHERE b.team_id=? AND b.channel_id=? AND b.message_ts=?
+                 AND h.handoff_id=? AND h.claim_token=? AND h.handoff_type='draft_content'
+                 AND h.status='failed' AND h.error=? AND w.status='approved'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM work_items newer
+                     WHERE newer.work_item_id=w.work_item_id AND newer.version>w.version
+                 )""",
+            (team_id, channel_id, message_ts, handoff_id, claim_token, DRAFT_TIMEOUT_ERROR),
+        ).fetchone()
+        if handoff is None:
+            return False
+        conn.execute(
+            """UPDATE handoff_jobs SET status='pending', claimed_at=NULL, completed_at=NULL,
+                   claim_token=NULL, error=NULL WHERE handoff_id=?""",
+            (handoff_id,),
+        )
+        _audit(
+            conn, event_type="handoff.retry_requested", work=dict(handoff),
+            actor_type="human", actor_id=actor.actor_id, platform=actor.platform,
+            previous_state="failed", new_state="pending", reason=DRAFT_TIMEOUT_ERROR,
+            correlation_id=handoff["correlation_id"],
+        )
+    return True
 
 
 def claim_handoffs(handoff_type: str, *, limit: int = 10,

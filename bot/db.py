@@ -9,6 +9,8 @@ from pathlib import Path
 
 from .config import DB_PATH
 
+DRAFT_TIMEOUT_ERROR = "CodexTimeoutError"
+
 
 def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -70,6 +72,23 @@ def _ensure_team_brief_approval_mode(conn: sqlite3.Connection) -> None:
                 DEFAULT 'legal_before_draft'
                 CHECK (keyword_approval_mode IN ('legal_before_draft', 'draft_advisory'))
             """)
+
+
+def _refresh_legacy_draft_timeout_cards(conn: sqlite3.Connection) -> None:
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 1:
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= 1:
+            return
+        conn.execute("""
+            UPDATE team_briefs SET sync_version=sync_version+1
+            WHERE message_ts IS NOT NULL AND brief_id IN (
+                SELECT correlation_id FROM handoff_jobs
+                WHERE handoff_type='draft_content' AND status='failed' AND error=?
+            )
+        """, (DRAFT_TIMEOUT_ERROR,))
+        conn.execute("PRAGMA user_version = 1")
 
 
 def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
@@ -391,6 +410,7 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
     try:
         _ensure_legal_evidence_schema(conn)
         _ensure_team_brief_approval_mode(conn)
+        _refresh_legacy_draft_timeout_cards(conn)
     except sqlite3.Error:
         conn.close()
         raise

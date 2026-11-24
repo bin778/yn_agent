@@ -6,6 +6,7 @@ import fcntl
 import logging
 import sqlite3
 import time
+import uuid
 from collections import Counter
 from contextlib import closing
 from functools import lru_cache
@@ -14,7 +15,7 @@ from html import escape
 from slack_sdk.errors import SlackClientError
 
 from .. import workflow
-from ..db import get_conn, get_work_item
+from ..db import DRAFT_TIMEOUT_ERROR, get_conn, get_work_item
 from ..slack_approval_demo import COMMAND as KEYWORD_CARD, CONTENT_COMMAND, SlackApprovalCards, render_card
 from ..schemas import DRAFT_TOPICS
 from ..team_brief import AGENTS, TeamBriefs
@@ -23,6 +24,7 @@ from .config import SlackConfigurationError
 from .drafts import REQUEST_ROLES
 
 COMMAND = "/hermes-team"
+DRAFT_RETRY_ACTION = "hermes_team_draft_retry"
 LOGGER = logging.getLogger(__name__)
 TITLE = "Hermes · 주간 콘텐츠·광고 브리핑 · 합성 데이터"
 REQUESTOR_ROLES = REQUEST_ROLES | {"data_owner", "performance_approver"}
@@ -49,6 +51,17 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
     drafts = [item for item in items if item["agent_id"] == "content_editor"]
     draft_waiting = sum(item["status"] in {"pending", "claimed"} for item in handoffs)
     draft_failed = sum(item["status"] == "failed" for item in handoffs)
+    approved_keywords = {
+        (item["work_item_id"], item["version"]): item["output"]["keyword"]
+        for item in keywords if item["status"] == "approved"
+    }
+    timed_out = [
+        (approved_keywords[key], handoff)
+        for handoff in handoffs
+        if handoff["status"] == "failed" and handoff["error"] == DRAFT_TIMEOUT_ERROR
+        and handoff["claim_token"]
+        and (key := (handoff["work_item_id"], handoff["work_item_version"])) in approved_keywords
+    ]
     counts = Counter(item["status"] for item in keywords)
     content = [
         f"{label} {count}건"
@@ -116,9 +129,11 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
         {"type": "header", "text": {"type": "plain_text", "text": TITLE}},
         _section(summary),
     ]
-    if actions:
-        labels = " · ".join(f"{label} {len(candidates)}건" for label, candidates in actions)
-        fallback += f"\n다음 행동 · {labels}"
+    if actions or timed_out:
+        labels = [f"{label} {len(candidates)}건" for label, candidates in actions]
+        if timed_out:
+            labels.append(f"초안 생성 시간 초과 {len(timed_out)}건")
+        fallback += "\n다음 행동 · " + " · ".join(labels)
         blocks.append(_section("다음 행동"))
         missing_link = False
         for label, candidates in actions:
@@ -140,6 +155,21 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
                 blocks.append(_section(f"나머지 {len(candidates) - 3}건은 스레드에서 확인할 수 있습니다."))
         if permalink and missing_link:
             blocks.append(_section("링크가 없는 항목은 이 스레드에서 확인할 수 있습니다."))
+        available = 50 - len(blocks)
+        overflow = len(timed_out) > available
+        if overflow:
+            available -= 1
+        for keyword, handoff in timed_out[:available]:
+            blocks.append({
+                **_section(f"{' '.join(keyword.split())[:180]} · 초안 생성 시간 초과"),
+                "accessory": {
+                    "type": "button", "action_id": DRAFT_RETRY_ACTION,
+                    "text": {"type": "plain_text", "text": "초안 재시도"},
+                    "value": f"{handoff['handoff_id']}:{handoff['claim_token']}",
+                },
+            })
+        if overflow:
+            blocks.append(_section("표시된 재시도를 등록하면 나머지 시간 초과 작업을 확인할 수 있습니다."))
     elif draft_waiting:
         fallback += "\n다음 행동 · 초안이 작성되면 스레드에서 확인해 주세요."
         blocks.append(_section("초안이 작성되면 스레드에서 확인해 주세요."))
@@ -282,6 +312,31 @@ class SlackTeamBriefs(SlackApprovalCards):
             respond(response_type="ephemeral", text="브리핑을 접수하지 못했습니다. 잠시 후 다시 요청해 주세요.")
             return
         respond(response_type="ephemeral", text=f"팀 브리핑을 접수했습니다. · {brief_id}")
+
+    def handle_draft_retry(self, *, ack, body: dict, action: dict, respond) -> None:
+        ack()
+        try:
+            team_id = body["team"]["id"]
+            channel_id = body["channel"]["id"]
+            actor = self._actor(team_id, channel_id, body["user"]["id"])
+            handoff_id, claim_token = (str(uuid.UUID(part)) for part in action["value"].split(":"))
+            queued = workflow.retry_team_draft_timeout(
+                actor=actor, team_id=team_id, channel_id=channel_id,
+                message_ts=body["message"]["ts"], handoff_id=handoff_id,
+                claim_token=claim_token, db_path=self.db_path,
+            )
+            feedback = (
+                "기존 승인으로 초안 재시도를 등록했습니다. 결과는 같은 스레드에서 확인할 수 있습니다."
+                if queued else "현재 카드에서 이 초안을 다시 시도할 수 없습니다. 최신 PM 카드 상태를 확인해 주세요."
+            )
+        except (SlackConfigurationError, workflow.AuthorizationError):
+            feedback = "이 채널에서 초안을 재시도하려면 키워드 승인 권한이 필요합니다."
+        except (KeyError, ValueError, TypeError, AttributeError):
+            feedback = "최신 PM 카드에서 초안 재시도를 눌러 주세요."
+        except sqlite3.Error as exc:
+            LOGGER.warning("Brief draft retry enqueue failed error_type=%s", type(exc).__name__)
+            feedback = "재시도를 등록하지 못했습니다. 잠시 후 다시 시도해 주세요."
+        respond(response_type="ephemeral", replace_original=False, text=feedback)
 
     def process_next(self, client) -> bool:
         """Serialize brief work across restarts and separate model and delivery retries."""

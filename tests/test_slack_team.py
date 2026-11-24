@@ -7,10 +7,11 @@ from unittest.mock import Mock, patch
 from bot import workflow
 from bot.agents.content_editor import SlackContentEditorOutput
 from bot.db import get_conn, get_tracking_status, upsert_tracking_status
+from bot.llm_client import CodexTimeoutError
 from bot.schemas import DataAssistantOutput, KeywordAnalystOutput, PerformanceAnalystOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
 from bot.slack_adapter.config import SlackMapping, SlackSettings
-from bot.slack_adapter.team import COMMAND, SlackTeamBriefs
+from bot.slack_adapter.team import COMMAND, DRAFT_RETRY_ACTION, SlackTeamBriefs
 
 
 class SlackTeamTest(unittest.TestCase):
@@ -246,6 +247,85 @@ class SlackTeamTest(unittest.TestCase):
         _, items, _ = self.briefs.team.snapshot(brief_id)
         request = next(item["request_id"] for item in items if item["agent_id"] == "keyword_analyst")
         self.assertEqual(len(self.briefs._state(request)["requirements"]), 2)
+
+    def test_retry_only_requeues_the_clicked_timeout_attempt_on_the_bound_pm_card(self):
+        self.submit()
+        self.drain()
+        brief = self.brief()
+        self.keyword_action("UKEYWORD")
+        self.keyword_action("ULEGAL")
+        model = self.models["content_editor"]
+        model.side_effect = [CodexTimeoutError(), CodexTimeoutError(), model.return_value]
+        self.drain()
+        _, items, handoffs = self.briefs.team.snapshot(brief["brief_id"])
+        request_id = next(item["request_id"] for item in items if item["agent_id"] == "keyword_analyst")
+        approval = workflow.get_approval_state(request_id, self.db)
+        handoff_id = handoffs[0]["handoff_id"]
+
+        def retry_value():
+            report = self.pm_card()
+            self.assertIn("상담 준비 · 초안 생성 시간 초과", self.pm_action_text(report))
+            return next(
+                block["accessory"]["value"] for block in report["blocks"]
+                if block.get("accessory", {}).get("action_id") == DRAFT_RETRY_ACTION
+            )
+
+        def click(value, user="UKEYWORD", message_ts=brief["message_ts"]):
+            ack, respond = Mock(), Mock()
+            self.actions[DRAFT_RETRY_ACTION](
+                ack=ack, respond=respond, action={"value": value},
+                body={"team": {"id": "TTEAM"}, "channel": {"id": "CCHANNEL"},
+                      "user": {"id": user}, "message": {"ts": message_ts}},
+            )
+            ack.assert_called_once()
+            return respond.call_args.kwargs["text"]
+
+        first_value = retry_value()
+        self.assertIn("승인 권한이 필요", click(first_value, user="UCONTENT"))
+        self.assertIn("다시 시도할 수 없습니다", click(first_value, message_ts="1.99"))
+        self.assertIn("기존 승인으로 초안 재시도를 등록", click(first_value))
+        self.assertIn("다시 시도할 수 없습니다", click(first_value))
+        self.drain()
+        second_value = retry_value()
+        self.assertNotEqual(first_value, second_value)
+        self.assertIn("다시 시도할 수 없습니다", click(first_value))
+        self.assertIn("기존 승인으로 초안 재시도를 등록", click(second_value))
+        self.drain()
+
+        self.assertEqual(model.call_count, 3)
+        self.assertEqual(workflow.get_approval_state(request_id, self.db), approval)
+        _, _, handoffs = self.briefs.team.snapshot(brief["brief_id"])
+        self.assertEqual([(row["handoff_id"], row["status"]) for row in handoffs],
+                         [(handoff_id, "completed")])
+        self.assertNotIn("재시도", self.pm_action_text(self.pm_card()))
+        self.assertIn("검토용 초안 확인 1건", self.pm_action_text(self.pm_card()))
+        replies = [call.kwargs for call in self.client.chat_postMessage.call_args_list
+                   if "한도윤 · 검토용 콘텐츠 초안" in call.kwargs["text"]]
+        self.assertEqual([reply["thread_ts"] for reply in replies], [brief["message_ts"]])
+        for name in ("keyword_analyst", "data_assistant", "performance_analyst"):
+            self.models[name].assert_called_once()
+
+    def test_refreshes_existing_timeout_card_once_and_skips_other_errors(self):
+        self.submit()
+        self.drain()
+        self.keyword_action("UKEYWORD")
+        self.keyword_action("ULEGAL")
+        self.models["content_editor"].side_effect = RuntimeError()
+        self.drain()
+        self.assertNotIn("시간 초과", self.pm_action_text(self.pm_card()))
+        prior = self.brief()
+        with closing(get_conn(self.db)) as conn, conn:
+            conn.execute("UPDATE handoff_jobs SET error='CodexTimeoutError'")
+            conn.execute("PRAGMA user_version=0")
+
+        self.drain(self.new_worker())
+        updated = self.brief()
+        self.assertEqual(updated["sync_version"], prior["sync_version"] + 1)
+        self.assertEqual(updated["delivered_version"], updated["sync_version"])
+        self.assertEqual(updated["message_ts"], prior["message_ts"])
+        self.assertIn("상담 준비 · 초안 생성 시간 초과", self.pm_action_text(self.pm_card()))
+        self.assertFalse(self.new_worker().process_next(self.client))
+        self.models["content_editor"].assert_called_once()
 
     def test_reject_feedback_and_no_draft_handoff(self):
         self.submit()
