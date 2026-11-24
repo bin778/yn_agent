@@ -26,6 +26,7 @@ from .drafts import REQUEST_ROLES
 COMMAND = "/hermes-team"
 DRAFT_RETRY_ACTION = "hermes_team_draft_retry"
 PERFORMANCE_RETRY_ACTION = "hermes_team_performance_retry"
+BRIEF_SCENARIOS = ("normal", "critical", "stale", "missing", "zero")
 LOGGER = logging.getLogger(__name__)
 TITLE = "Hermes · 주간 콘텐츠·광고 브리핑 · 합성 데이터"
 REQUESTOR_ROLES = REQUEST_ROLES | {"data_owner", "performance_approver"}
@@ -105,7 +106,10 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
     )
     ads = STAGE_LABELS[performance_job["status"]]
     if halted:
-        ads = "보류 · " + halted[0]["output"]["reason"][:350]
+        outcome = halted[0]["output"]
+        ads = "보류 · " + outcome["reason"][:350]
+        if outcome.get("next_action"):
+            ads += " " + outcome["next_action"]
     elif performance:
         ads = f"개선안 {len(performance)}건"
     elif performance_job["status"] == "completed":
@@ -214,7 +218,9 @@ def _detail(item: dict) -> str:
             output["reason"], anomalies, actions,
         ]))
     if output.get("halted"):
-        return f"김도현 · 광고 제안 보류\n{output['reason']}"
+        return "\n".join(filter(None, [
+            "김도현 · 광고 제안 보류", output["reason"], output.get("next_action"),
+        ]))
     return (
         f"김도현 · 광고 개선안 · {output['keyword']}\n"
         f"{output.get('campaign', '')} · {output['action']} {output['adjustment_percentage']:+d}%\n"
@@ -319,8 +325,9 @@ class SlackTeamBriefs(SlackApprovalCards):
             return
 
         words = command.get("text", "").strip().lower().split()
-        if words not in (["brief"], ["brief", "normal"], ["brief", "critical"]):
-            respond(response_type="ephemeral", text="사용법: /hermes-team brief [normal|critical]")
+        if words != ["brief"] and (len(words) != 2 or words[0] != "brief" or words[1] not in BRIEF_SCENARIOS):
+            scenarios = "|".join(BRIEF_SCENARIOS)
+            respond(response_type="ephemeral", text=f"사용법: /hermes-team brief [{scenarios}]")
             return
         scenario = words[-1] if len(words) == 2 else "normal"
         try:

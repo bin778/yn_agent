@@ -1,3 +1,4 @@
+import datetime as dt
 import tempfile
 import unittest
 from contextlib import closing
@@ -6,7 +7,8 @@ from unittest.mock import Mock, patch
 
 from bot import workflow
 from bot.agents.content_editor import SlackContentEditorOutput
-from bot.db import get_conn, get_tracking_status, upsert_tracking_status
+from bot.db import get_conn, get_tracking_status, upsert_tracking_status, utc_now
+from bot.fake_data import get_fake_tracking_data
 from bot.llm_client import CodexTimeoutError
 from bot.schemas import DataAssistantOutput, KeywordAnalystOutput, PerformanceAnalystOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
@@ -467,3 +469,55 @@ class SlackTeamTest(unittest.TestCase):
         self.assertEqual(brief["message_ts"], synced["message_ts"])
         for name in ("keyword_analyst", "data_assistant", "performance_analyst"):
             self.models[name].assert_called_once()
+
+    def test_stale_tracking_blocks_ads_but_allows_approved_content_draft(self):
+        self.submit(text="brief stale")
+        self.drain()
+        self.models["data_assistant"].assert_not_called()
+        self.models["performance_analyst"].assert_not_called()
+        self.assertIn("퍼포먼스 마케팅팀 · 보류 · 트래킹 수집 지연", self.pm_card()["text"])
+        self.assertIn("집계가 갱신되면 새 브리핑", self.pm_card()["text"])
+        self.keyword_action("UKEYWORD")
+        self.keyword_action("ULEGAL")
+        self.drain()
+        self.models["content_editor"].assert_called_once()
+        self.assertIn("초안 1건", self.pm_card()["text"])
+
+    def test_missing_required_count_blocks_ads_and_identifies_metric(self):
+        self.submit(text="brief missing")
+        self.drain()
+        self.models["data_assistant"].assert_not_called()
+        self.models["performance_analyst"].assert_not_called()
+        self.models["keyword_analyst"].assert_called_once()
+        self.assertIn("트래킹 필수 지표 누락 또는 오류 · 폼 제출", self.pm_card()["text"])
+
+    def test_complete_zero_count_is_preserved_and_allows_ad_analysis(self):
+        self.submit(text="brief zero")
+        self.drain()
+        self.models["data_assistant"].assert_called_once()
+        self.models["performance_analyst"].assert_called_once()
+        _, items, _ = self.briefs.team.snapshot(self.brief()["brief_id"])
+        data = next(item["output"] for item in items if item["agent_id"] == "data_assistant")
+        self.assertEqual(data["tracking_input"]["counts"]["submit_form"], 0)
+        self.assertIn("퍼포먼스 마케팅팀 · 개선안 1건", self.pm_card()["text"])
+
+    def test_incomplete_zero_counts_still_block_ads(self):
+        raw = get_fake_tracking_data("zero")
+        raw["collection_complete"] = False
+        with patch("bot.agents.data_assistant.get_fake_tracking_data", return_value=raw):
+            self.submit(text="brief zero")
+            self.drain()
+        self.models["performance_analyst"].assert_not_called()
+        self.assertIn("트래킹 집계가 완료되지 않았습니다", self.pm_card()["text"])
+
+    def test_retry_checks_source_age_instead_of_the_time_of_the_previous_decision(self):
+        model = self.models["performance_analyst"]
+        model.side_effect = CodexTimeoutError()
+        self.submit()
+        self.drain()
+        value = self.performance_retry_value()
+        self.assertIn("재시도를 등록했습니다", self.click_performance_retry(value))
+        with patch("bot.agents.data_assistant.utc_now", return_value=utc_now() + dt.timedelta(hours=4)):
+            self.drain()
+        model.assert_called_once()
+        self.assertIn("퍼포먼스 마케팅팀 · 보류 · 트래킹 수집 지연", self.pm_card()["text"])

@@ -12,9 +12,10 @@
   privacy  — 미마스킹 IP 필드 포함 (privacy_flags → 개발팀)
 """
 import copy
+import datetime as dt
 import random
 
-TRACKING_SCENARIOS = ("critical", "warning", "normal", "privacy")
+TRACKING_SCENARIOS = ("critical", "warning", "normal", "privacy", "stale", "missing", "zero")
 
 
 def get_fake_search_data() -> list[dict]:
@@ -36,8 +37,14 @@ def get_fake_tracking_data(scenario: str = "critical") -> dict:
     if scenario not in TRACKING_SCENARIOS:
         scenario = "critical"
 
+    collected_through = dt.datetime.now(dt.timezone.utc)
+    if scenario == "stale":
+        collected_through -= dt.timedelta(days=3)
+
     base = {
         "scenario": scenario,
+        "collected_through": collected_through.isoformat(),
+        "collection_complete": True,
         "ga4": {
             "sessions_today": 1200,
             "sessions_wow_avg": 1150,
@@ -77,6 +84,10 @@ def get_fake_tracking_data(scenario: str = "critical") -> dict:
             {"client_ip": "203.0.113.42", "device_id": "abc-device-001", "event": "page_view"},
         ]
         base["gtm"]["note"] = "ETL 마스킹 누락 의심 샘플 포함"
+    elif scenario == "missing":
+        del base["ga4"]["events"]["submit_form"]
+    elif scenario == "zero":
+        base["ga4"]["events"]["submit_form"] = {"today": 0, "wow_avg": 0, "change_pct": 0}
     # normal: base 그대로
 
     return copy.deepcopy(base)

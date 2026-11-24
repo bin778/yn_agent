@@ -158,19 +158,21 @@ class TeamBriefs:
                 tracking = next(
                     (item["output"] for item in items if item["agent_id"] == AGENTS["data"]), {}
                 )
-                if tracking.get("status_summary") and not tracking.get("privacy_flags"):
-                    performance_analyst.run_bid_optimization(tracking["status_summary"], **args)
+                if tracking.get("privacy_flags"):
+                    issue = ("트래킹 점검에 개인정보 신호가 있습니다.", "마스킹 상태를 확인해 주세요.")
+                elif tracking.get("status_summary") not in ("Normal", "Warning", "Critical"):
+                    issue = ("같은 브리핑의 트래킹 점검 결과가 없습니다.", "새 브리핑으로 트래킹을 다시 점검해 주세요.")
                 else:
-                    reason = (
-                        "데이터 점검에 개인정보 신호가 있어 광고 제안을 보류했습니다."
-                        if tracking.get("privacy_flags") else
-                        "같은 브리핑의 트래킹 점검 결과가 없어 광고 제안을 보류했습니다."
-                    )
+                    issue = data_assistant.tracking_input_issue(tracking.get("tracking_input"))
+                if issue:
+                    reason, next_action = issue
                     pending.append({
                         "agent_id": AGENTS["performance"], "routed_to": "dev_team.queue",
-                        "output": {"halted": True, "reason": reason},
+                        "output": {"halted": True, "reason": reason, "next_action": next_action},
                         "model_version": "policy-engine/no-llm", "input_summary": "halt:tracking_unusable",
                     })
+                else:
+                    performance_analyst.run_bid_optimization(tracking["status_summary"], **args)
         except Exception as exc:
             error = type(exc).__name__
             LOGGER.warning("Brief stage failed brief_id=%s stage=%s error_type=%s", brief_id, stage, error)

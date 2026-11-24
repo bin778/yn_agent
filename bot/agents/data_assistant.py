@@ -12,17 +12,77 @@ steps 매핑:
   record      → workflow.create_work_item() + upsert_tracking_status()
 """
 import copy
+import datetime as dt
 import json
 
 from ..loaders import build_system_prompt
 from ..fake_data import get_fake_tracking_data
 from ..llm_client import call_structured, get_model_identity
 from ..schemas import DataAssistantOutput
-from ..db import recent_history, upsert_tracking_status
+from ..db import recent_history, upsert_tracking_status, utc_now
 from ..workflow import create_work_item
 from ..config import USE_FAKE_DATA
 
 AGENT_ID = "data_assistant"
+MAX_TRACKING_AGE_HOURS = 3
+REQUIRED_TRACKING_COUNTS = {
+    "sessions_today": "세션",
+    "click_kakaotalk": "카카오톡 클릭",
+    "submit_form": "폼 제출",
+}
+
+
+def _source_time(value: object) -> dt.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = dt.datetime.fromisoformat(value)
+        return timestamp.astimezone(dt.timezone.utc) if timestamp.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def _tracking_snapshot(raw: dict) -> dict:
+    ga4 = raw.get("ga4")
+    ga4 = ga4 if isinstance(ga4, dict) else {}
+    events = ga4.get("events")
+    events = events if isinstance(events, dict) else {}
+    counts = {"sessions_today": ga4.get("sessions_today")}
+    for name in ("click_kakaotalk", "submit_form"):
+        event = events.get(name)
+        counts[name] = event.get("today") if isinstance(event, dict) else None
+    timestamp = _source_time(raw.get("collected_through"))
+    return {
+        "collected_through": timestamp.isoformat() if timestamp else None,
+        "collection_complete": raw.get("collection_complete") is True,
+        "counts": {name: value if type(value) is int and value >= 0 else None for name, value in counts.items()},
+    }
+
+
+def tracking_input_issue(snapshot: object) -> tuple[str, str] | None:
+    """Check reported source coverage again at the time of the advertising decision."""
+    if not isinstance(snapshot, dict) or not snapshot:
+        return ("트래킹 수집 정보가 없습니다.", "새 브리핑으로 트래킹을 다시 점검해 주세요.")
+    timestamp = _source_time(snapshot.get("collected_through"))
+    now = utc_now()
+    if timestamp is None or timestamp > now:
+        return ("트래킹 수집 기준 시각을 확인할 수 없습니다.", "소스의 수집 시각을 확인해 주세요.")
+    if now - timestamp > dt.timedelta(hours=MAX_TRACKING_AGE_HOURS):
+        return (
+            f"트래킹 수집 지연 · 마지막 수집 기준 시각이 {MAX_TRACKING_AGE_HOURS}시간을 초과했습니다.",
+            "집계가 갱신되면 새 브리핑을 실행해 주세요.",
+        )
+    if snapshot.get("collection_complete") is not True:
+        return ("트래킹 집계가 완료되지 않았습니다.", "집계 완료 후 새 브리핑을 실행해 주세요.")
+    counts = snapshot.get("counts")
+    counts = counts if isinstance(counts, dict) else {}
+    missing = [
+        label for name, label in REQUIRED_TRACKING_COUNTS.items()
+        if type(counts.get(name)) is not int or counts[name] < 0
+    ]
+    if missing:
+        return (f"트래킹 필수 지표 누락 또는 오류 · {', '.join(missing)}.", "누락된 지표의 수집 상태를 확인해 주세요.")
+    return None
 
 
 def _format_anomaly_history(db_path=None) -> str:
@@ -102,6 +162,40 @@ def run_anomaly_check(scenario: str = "critical", *, db_path=None, record_work_i
 
     record = record_work_item or create_work_item
     masked, pre_flags = _mask_pii(raw)
+    tracking_snapshot = _tracking_snapshot(masked)
+    issue = tracking_input_issue(tracking_snapshot)
+    if issue:
+        reason, next_action = issue
+        result = DataAssistantOutput(status_summary="Critical", reason=reason, action_items=[next_action])
+        model_version = "policy-engine/no-llm"
+    else:
+        result = _analyze_tracking(masked, pre_flags, db_path)
+        model_version = get_model_identity()
+
+    # 전처리에서 잡은 privacy_flags는 모델이 빠뜨려도 병합
+    merged_flags = list(dict.fromkeys([*result.privacy_flags, *pre_flags]))
+    if merged_flags != result.privacy_flags:
+        result = result.model_copy(update={"privacy_flags": merged_flags})
+
+    targets = _classify_targets(result)
+    output = {**result.model_dump(), "tracking_input": tracking_snapshot}
+    workflow_ref = record(
+        agent_id=AGENT_ID,
+        output=output,
+        routed_to=",".join(targets),
+        model_version=model_version,
+        input_summary=f"scenario={scenario}|status={result.status_summary}",
+        db_path=db_path,
+    )
+    if record_work_item is None:
+        upsert_tracking_status(
+            result.status_summary, output, workflow_ref["work_item_id"], workflow_ref["version"], db_path=db_path,
+        )
+
+    return {"item": result, "targets": targets, **workflow_ref, "scenario": scenario}
+
+
+def _analyze_tracking(masked: dict, pre_flags: list[str], db_path) -> DataAssistantOutput:
     system_prompt = build_system_prompt(AGENT_ID)
     history_text = _format_anomaly_history(db_path)
 
@@ -109,6 +203,7 @@ def run_anomaly_check(scenario: str = "critical", *, db_path=None, record_work_i
 SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세요.
 개인 식별 정보 원문(IP, 기기ID, User-Agent)은 절대 출력에 넣지 마세요.
 항상 집계/캠페인/페이지 단위로만 서술하고, action_items에 실행 가능한 다음 조치를 넣으세요.
+집계가 완료된 숫자 0은 유효한 관측치입니다. 오류나 비정상 급락의 근거 없이 0을 누락이나 Critical로 분류하지 마세요.
 
 코드 전처리에서 감지한 privacy 신호(참고, 해당 시 privacy_flags에 반영):
 {json.dumps(pre_flags, ensure_ascii=False)}
@@ -120,40 +215,8 @@ SOUL.md 원칙에 따라 status_summary를 판정하고 JSON으로 응답하세�
 {json.dumps(masked, ensure_ascii=False, indent=2)}
 """
 
-    result: DataAssistantOutput = call_structured(
+    return call_structured(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         schema_model=DataAssistantOutput,
     )
-
-    # 전처리에서 잡은 privacy_flags는 모델이 빠뜨려도 병합
-    merged_flags = list(dict.fromkeys([*result.privacy_flags, *pre_flags]))
-    if merged_flags != result.privacy_flags:
-        result = result.model_copy(update={"privacy_flags": merged_flags})
-
-    targets = _classify_targets(result)
-    routed_to = ",".join(targets)
-
-    workflow_ref = record(
-        agent_id=AGENT_ID,
-        output=result.model_dump(),
-        routed_to=routed_to,
-        model_version=get_model_identity(),
-        input_summary=f"scenario={scenario}|status={result.status_summary}",
-        db_path=db_path,
-    )
-    if record_work_item is None:
-        upsert_tracking_status(
-            result.status_summary,
-            result.model_dump(),
-            workflow_ref["work_item_id"],
-            workflow_ref["version"],
-            db_path=db_path,
-        )
-
-    return {
-        "item": result,
-        "targets": targets,
-        **workflow_ref,
-        "scenario": scenario,
-    }
