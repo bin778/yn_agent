@@ -9,7 +9,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from . import workflow
+from . import brief_inputs, workflow
 from .agents import content_editor, data_assistant, keyword_analyst, performance_analyst
 from .db import CODEX_TIMEOUT_ERROR, get_conn, get_work_item, utc_iso
 from .schemas import DRAFT_TOPICS
@@ -36,21 +36,66 @@ class TeamBriefs:
     def enqueue(self, *, trigger_id: str, user_id: str, scenario: str) -> str:
         brief_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"hermes:brief:{self.team_id}:{trigger_id}"))
         with closing(get_conn(self.db_path)) as conn, conn:
-            created = conn.execute(
-                """INSERT INTO team_briefs
-                   (brief_id, team_id, channel_id, user_id, tracking_scenario, created_at, keyword_approval_mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(brief_id) DO NOTHING""",
-                (
-                    brief_id, self.team_id, self.channel_id, user_id, scenario, utc_iso(),
-                    self.keyword_approval_mode.value,
-                ),
-            ).rowcount
-            if created:
-                conn.executemany(
-                    "INSERT INTO team_brief_jobs (brief_id, stage) VALUES (?, ?)",
-                    [(brief_id, stage) for stage in AGENTS],
-                )
+            self._enqueue(conn, brief_id, user_id, scenario)
         return brief_id
+
+    def _enqueue(self, conn, brief_id: str, user_id: str, scenario: str) -> None:
+        created = conn.execute(
+            """INSERT INTO team_briefs
+               (brief_id, team_id, channel_id, user_id, tracking_scenario, created_at, keyword_approval_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(brief_id) DO NOTHING""",
+            (
+                brief_id, self.team_id, self.channel_id, user_id, scenario, utc_iso(),
+                self.keyword_approval_mode.value,
+            ),
+        ).rowcount
+        if created:
+            conn.executemany(
+                "INSERT INTO team_brief_jobs (brief_id, stage) VALUES (?, ?)",
+                [(brief_id, stage) for stage in AGENTS],
+            )
+
+    def save_input(self, input_id: str, user_id: str, data: dict) -> dict:
+        now = time.time()
+        with closing(get_conn(self.db_path)) as conn, conn:
+            conn.execute("DELETE FROM team_brief_inputs WHERE brief_id IS NULL AND expires_at < ?", (now,))
+            conn.execute(
+                """INSERT INTO team_brief_inputs (input_id,team_id,channel_id,user_id,payload_json,expires_at)
+                   VALUES (?,?,?,?,?,?) ON CONFLICT(input_id) DO NOTHING""",
+                (input_id, self.team_id, self.channel_id, user_id, json.dumps(data), now + 1800),
+            )
+            row = conn.execute(
+                "SELECT payload_json FROM team_brief_inputs WHERE input_id=? AND team_id=? AND channel_id=? AND user_id=?",
+                (input_id, self.team_id, self.channel_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise workflow.NotFoundError("input not found")
+            return json.loads(row["payload_json"])
+
+    def confirm_input(self, input_id: str, user_id: str) -> str:
+        with closing(get_conn(self.db_path)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT brief_id FROM team_brief_inputs WHERE input_id=? AND team_id=? AND channel_id=?
+                   AND user_id=? AND (brief_id IS NOT NULL OR expires_at >= ?)""",
+                (input_id, self.team_id, self.channel_id, user_id, time.time()),
+            ).fetchone()
+            if row is None:
+                raise workflow.NotFoundError("input not found or expired")
+            if row["brief_id"]:
+                return row["brief_id"]
+            brief_id = str(uuid.uuid4())
+            self._enqueue(conn, brief_id, user_id, "imported")
+            conn.execute("UPDATE team_brief_inputs SET brief_id=? WHERE input_id=?", (brief_id, input_id))
+            return brief_id
+
+    def imported_input(self, brief_id: str) -> dict | None:
+        with closing(get_conn(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM team_brief_inputs WHERE brief_id=? AND team_id=? AND channel_id=?",
+                (brief_id, self.team_id, self.channel_id),
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
 
     def get_brief(self, brief_id: str) -> dict | None:
         with closing(get_conn(self.db_path)) as conn:
@@ -149,7 +194,12 @@ class TeamBriefs:
 
         try:
             args = {"db_path": self.db_path, "record_work_item": buffer_work_item}
-            if stage == "data":
+            if job["tracking_scenario"] == "imported":
+                data = self.imported_input(brief_id)
+                if data is None:
+                    raise workflow.NotFoundError("confirmed brief input is missing")
+                self._analyze_imported(brief_id, stage, data, args)
+            elif stage == "data":
                 data_assistant.run_anomaly_check(job["tracking_scenario"], **args)
             elif stage == "keyword":
                 keyword_analyst.run_daily_keyword_scan(**args)
@@ -194,6 +244,28 @@ class TeamBriefs:
                 "Brief performance finished brief_id=%s attempt=%s elapsed_ms=%d error_type=%s",
                 brief_id, job["retry_count"], (time.monotonic() - started) * 1000, error or "-",
             )
+
+    def _analyze_imported(self, brief_id: str, stage: str, data: dict, args: dict) -> None:
+        issue = brief_inputs.hold_reason(data)
+        if stage == "data":
+            args["record_work_item"](
+                db_path=self.db_path, agent_id=AGENTS["data"], routed_to="data_assistant.tracking_status",
+                output={
+                    "status_summary": "Warning" if issue else "Normal",
+                    "reason": issue or "제출된 과거 보고서의 기간, 시간대, 일별 지표를 확인했습니다.",
+                    "tracking_anomalies": data["warnings"],
+                    "action_items": ["원본 보고서의 집계 상태와 누락 행을 확인해 주세요."] if issue else [],
+                },
+                model_version="policy-engine/no-llm", input_summary="verified_input:tracking",
+            )
+        elif stage == "keyword":
+            if data["keywords"]:
+                keyword_analyst.run_daily_keyword_scan(search_data=data["keywords"], **args)
+        else:
+            stages, _, _ = self.snapshot(brief_id)
+            if stages["data"]["status"] != "completed":
+                issue = "같은 브리핑의 데이터 점검이 완료되지 않았습니다."
+            performance_analyst.record_imported_analysis(data, issue, **args)
 
     def _draft(self, brief_id: str) -> None:
         handoffs = workflow.claim_handoffs(

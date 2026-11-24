@@ -35,6 +35,7 @@ from .publish import register_publish_handlers
 from .service import SlackTestError, SlackTestService, SlackTestValidationError
 from .team import COMMAND as TEAM_COMMAND
 from .team import DRAFT_RETRY_ACTION, PERFORMANCE_RETRY_ACTION, SlackTeamBriefs
+from .brief_input import CONFIRM as INPUT_CONFIRM, MODAL as INPUT_MODAL
 
 
 LOGGER = logging.getLogger("hermes.slack")
@@ -404,8 +405,16 @@ def register_handlers(
         _register_approval_cards(app, team_briefs)
 
         @app.command(TEAM_COMMAND)
-        def _team_command(ack, command, respond):
-            team_briefs.handle_command(ack=ack, command=command, respond=respond)
+        def _team_command(ack, command, respond, client):
+            team_briefs.handle_command(ack=ack, command=command, respond=respond, client=client)
+
+        @app.view(INPUT_MODAL)
+        def _team_input(ack, body, client):
+            team_briefs.handle_input_submission(ack=ack, body=body, client=client)
+
+        @app.action(INPUT_CONFIRM)
+        def _team_input_confirmation(ack, body, action, respond):
+            team_briefs.handle_input_confirmation(ack=ack, body=body, action=action, respond=respond)
 
         @app.action(DRAFT_RETRY_ACTION)
         def _team_draft_retry(ack, body, action, respond):

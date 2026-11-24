@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import sqlite3
 import time
@@ -14,11 +15,12 @@ from html import escape
 
 from slack_sdk.errors import SlackClientError
 
-from .. import workflow
+from .. import brief_inputs, workflow
 from ..db import CODEX_TIMEOUT_ERROR, get_conn, get_work_item
 from ..slack_approval_demo import COMMAND as KEYWORD_CARD, CONTENT_COMMAND, SlackApprovalCards, render_card
 from ..schemas import DRAFT_TOPICS
 from ..team_brief import AGENTS, TeamBriefs
+from . import brief_input
 from .blocks import seoul_time_label
 from .config import SlackConfigurationError
 from .drafts import REQUEST_ROLES
@@ -38,7 +40,20 @@ ROLE_LABELS = {
 STAGE_LABELS = {"queued": "대기", "failed": "실패", "completed": "완료"}
 
 
-def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
+def _input_summary(data: dict) -> str:
+    return "\n".join((
+        f"출처 · GA4, {data.get('ads_source', '광고 성과 보고서')}"
+        + (" 및 검색어 보고서" if data["keywords"] else ""),
+        f"보고 기간 · {data['start']} ~ {data['end']} ({data['timezone']})",
+        f"집계 완료 · {'확인' if data['complete'] else '미확인'}",
+        f"원본 집계 시각 · {seoul_time_label(data['collected_through']) if data['collected_through'] else '미확인'}",
+        f"제출 처리 시각 · {seoul_time_label(data['imported_at'])}",
+        brief_inputs.summary_text(data),
+        *(["누락 · " + " / ".join(data["warnings"])] if data["warnings"] else []),
+    ))
+
+
+def _report(jobs, items, handoffs, permalink=None, *, imported=None) -> tuple[str, list[dict]]:
     keywords = [item for item in items if item["agent_id"] == AGENTS["keyword"]]
     pending = [item for item in keywords if item["status"] == "pending_approval"]
     legal_pending = [
@@ -81,7 +96,9 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
         if count
     ]
     if not content:
-        if keywords:
+        if imported is not None and not imported["keywords"]:
+            content.append("키워드 분석 대기 · 검색어 보고서 필요")
+        elif keywords:
             content.append("선택된 키워드 없음")
         elif jobs["keyword"]["status"] == "completed":
             content.append("키워드 후보 없음")
@@ -99,6 +116,7 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
 
     performance = [item for item in items if item["agent_id"] == AGENTS["performance"]]
     halted = [item for item in performance if item["output"].get("halted")]
+    historical = [item for item in performance if item["output"].get("historical_summary")]
     proposals = [item for item in performance if item["status"] == "pending_approval"]
     performance_job = jobs["performance"]
     performance_timeout = (
@@ -110,6 +128,8 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
         ads = "보류 · " + outcome["reason"][:350]
         if outcome.get("next_action"):
             ads += " " + outcome["next_action"]
+    elif historical:
+        ads = "성과 분석 완료"
     elif performance:
         ads = f"개선안 {len(performance)}건"
     elif performance_job["status"] == "completed":
@@ -134,12 +154,16 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
             ("전환 추적 점검 확인", tracking_review),
             ("광고 보류 사유 확인", halted),
             ("광고 개선안 검토", proposals),
+            ("광고 성과 확인", historical),
         )
         if candidates
     ]
-    fallback = f"{TITLE}\n{summary}"
+    title = TITLE if imported is None else f"Hermes · 주간 콘텐츠·광고 브리핑 · {brief_input.MODES[imported['mode']]}"
+    if imported is not None:
+        summary = _input_summary(imported) + "\n\n" + summary
+    fallback = f"{title}\n{summary}"
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": TITLE}},
+        {"type": "header", "text": {"type": "plain_text", "text": title}},
         _section(summary),
     ]
     if actions or timed_out or performance_timeout:
@@ -164,16 +188,16 @@ def _report(jobs, items, handoffs, permalink=None) -> tuple[str, list[dict]]:
             blocks.append(_section(f"{label} {len(candidates)}건"))
             for item in candidates[:3]:
                 output = item["output"]
-                title = output.get("keyword") or output.get("title") or output.get("status_summary") or "보류 상세"
-                title = " ".join(title.split())[:180]
+                item_title = output.get("keyword") or output.get("title") or output.get("status_summary") or "보류 상세"
+                item_title = " ".join(item_title.split())[:180]
                 url = permalink(item["work_item_id"]) if permalink else None
                 if url:
                     blocks.append({"type": "section", "text": {
                         "type": "mrkdwn", "verbatim": True,
-                        "text": f"{escape(title, quote=False)} · <{url}|카드 열기>",
+                        "text": f"{escape(item_title, quote=False)} · <{url}|카드 열기>",
                     }})
                 else:
-                    blocks.append(_section(title))
+                    blocks.append(_section(item_title))
                     missing_link = True
             if len(candidates) > 3:
                 blocks.append(_section(f"나머지 {len(candidates) - 3}건은 스레드에서 확인할 수 있습니다."))
@@ -221,6 +245,8 @@ def _detail(item: dict) -> str:
         return "\n".join(filter(None, [
             "김도현 · 광고 제안 보류", output["reason"], output.get("next_action"),
         ]))
+    if output.get("historical_summary"):
+        return "김도현 · 광고 성과 요약\n" + output["reason"]
     return (
         f"김도현 · 광고 개선안 · {output['keyword']}\n"
         f"{output.get('campaign', '')} · {output['action']} {output['adjustment_percentage']:+d}%\n"
@@ -267,7 +293,8 @@ class SlackTeamBriefs(SlackApprovalCards):
         if work is None or work["agent_id"] != AGENTS["keyword"]:
             raise workflow.NotFoundError("not a team keyword")
         brief_id = work["correlation_id"]
-        if self.team.get_brief(brief_id) is None:
+        brief = self.team.get_brief(brief_id)
+        if brief is None:
             raise workflow.NotFoundError("keyword is outside this team channel")
         output = work["output"]
         requirements = state["requirements"]
@@ -289,6 +316,8 @@ class SlackTeamBriefs(SlackApprovalCards):
             f"검색 의도 {output['intent_type']} · 위험도 {output['compliance_risk']}\n"
             f"{output['reason']}\n{output.get('compliance_note', '')}"
         )
+        if "reported_impressions" in output:
+            detail = f"보고 기간 광고 노출 {output['reported_impressions']:,}회\n" + detail
         if state["policy_key"] == "keyword_high_advisory":
             general_topic = DRAFT_TOPICS.get(output.get("draft_topic_category"), DRAFT_TOPICS["general"])
             detail = (
@@ -310,11 +339,14 @@ class SlackTeamBriefs(SlackApprovalCards):
             "rejection_feedback": "키워드를 반려했습니다.",
             **({"status_label": "일부 승인 완료"} if pending and approved else {}),
             "expiry_label": seoul_time_label(state["expires_at"]),
-            "card_title": "윤서진 · 키워드 후보 · 합성 데이터",
+            "card_title": (
+                "윤서진 · 키워드 후보 · 실제 검색어"
+                if brief["tracking_scenario"] == "imported" else "윤서진 · 키워드 후보 · 합성 데이터"
+            ),
             "detail": detail,
         }
 
-    def handle_command(self, *, ack, command, respond) -> None:
+    def handle_command(self, *, ack, command, respond, client) -> None:
         ack()
         try:
             actor = self._actor(command["team_id"], command["channel_id"], command["user_id"])
@@ -325,9 +357,17 @@ class SlackTeamBriefs(SlackApprovalCards):
             return
 
         words = command.get("text", "").strip().lower().split()
+        if len(words) == 2 and words[0] == "brief" and words[1] in brief_input.MODES:
+            try:
+                client.views_open(trigger_id=command["trigger_id"], view=brief_input.make_view(words[1], command["channel_id"]))
+            except SlackClientError as exc:
+                LOGGER.warning("Brief input modal failed error_type=%s", type(exc).__name__)
+                hint = " CSV 첨부에는 Hermes 앱의 files:read 권한이 필요합니다." if words[1] == "csv" else ""
+                respond(response_type="ephemeral", text="입력창을 열지 못했습니다." + hint)
+            return
         if words != ["brief"] and (len(words) != 2 or words[0] != "brief" or words[1] not in BRIEF_SCENARIOS):
             scenarios = "|".join(BRIEF_SCENARIOS)
-            respond(response_type="ephemeral", text=f"사용법: /hermes-team brief [{scenarios}]")
+            respond(response_type="ephemeral", text=f"/hermes-team brief [csv|text|{scenarios}]")
             return
         scenario = words[-1] if len(words) == 2 else "normal"
         try:
@@ -339,6 +379,61 @@ class SlackTeamBriefs(SlackApprovalCards):
             respond(response_type="ephemeral", text="브리핑을 접수하지 못했습니다. 잠시 후 다시 요청해 주세요.")
             return
         respond(response_type="ephemeral", text=f"팀 브리핑을 접수했습니다. · {brief_id}")
+
+    def handle_input_submission(self, *, ack, body, client) -> None:
+        ack()
+        try:
+            view = body["view"]
+            metadata = json.loads(view["private_metadata"])
+            mode, channel = metadata["mode"], metadata["channel"]
+            user = body["user"]["id"]
+            actor = self._actor(body["team"]["id"], channel, user)
+            input_id = str(uuid.UUID(metadata["id"]))
+            if not actor.roles & REQUESTOR_ROLES or mode not in brief_input.MODES:
+                return
+        except (SlackConfigurationError, KeyError, ValueError, TypeError):
+            return
+
+        blocks = None
+        try:
+            data = brief_input.read_view(client, view, user, mode)
+            data = self.team.save_input(input_id, actor.actor_id, data)
+            issue = brief_inputs.hold_reason(data)
+            text = f"{brief_input.MODES[mode]} 검증\n{_input_summary(data)}"
+            if issue:
+                text += f"\n광고 분석 보류 · {issue}"
+            if not data["keywords"]:
+                text += "\n키워드 분석 대기 · 검색어 보고서 필요"
+            text += "\n아래에서 30분 내 확인하면 PM 브리핑을 시작합니다."
+            blocks = [_section(text), {"type": "actions", "elements": [{
+                "type": "button", "action_id": brief_input.CONFIRM, "value": input_id,
+                "text": {"type": "plain_text", "text": "확인하고 브리핑 시작"}, "style": "primary",
+            }]}]
+        except brief_inputs.InputError as exc:
+            text = f"{exc}\n/hermes-team brief {mode}에서 수정해 다시 제출해 주세요."
+        except (sqlite3.Error, workflow.NotFoundError, KeyError, ValueError, TypeError) as exc:
+            LOGGER.warning("Brief input failed error_type=%s", type(exc).__name__)
+            text = "검증을 완료하지 못했습니다. 잠시 후 다시 제출해 주세요."
+        try:
+            client.chat_postEphemeral(channel=channel, user=user, text=escape(text, quote=False),
+                                      **({"blocks": blocks} if blocks else {}))
+        except SlackClientError as exc:
+            LOGGER.warning("Brief preview delivery failed error_type=%s", type(exc).__name__)
+
+    def handle_input_confirmation(self, *, ack, body, action, respond) -> None:
+        ack()
+        try:
+            actor = self._actor(body["team"]["id"], body["channel"]["id"], body["user"]["id"])
+            if not actor.roles & REQUESTOR_ROLES:
+                raise workflow.AuthorizationError("team brief request role is missing")
+            brief_id = self.team.confirm_input(str(uuid.UUID(action["value"])), actor.actor_id)
+            text = f"실제 데이터 브리핑을 접수했습니다. 결과는 이 채널의 PM 스레드에 게시합니다. · {brief_id}"
+        except (workflow.NotFoundError, workflow.AuthorizationError, SlackConfigurationError, KeyError, TypeError, ValueError):
+            text = "본인이 제출한 유효한 미리보기에서 다시 확인해 주세요."
+        except sqlite3.Error as exc:
+            LOGGER.warning("Brief input confirmation failed error_type=%s", type(exc).__name__)
+            text = "브리핑을 접수하지 못했습니다. 잠시 후 버튼을 다시 눌러 주세요."
+        respond(response_type="ephemeral", replace_original=False, text=text)
 
     def handle_draft_retry(self, *, ack, body: dict, action: dict, respond) -> None:
         ack()
@@ -425,11 +520,14 @@ class SlackTeamBriefs(SlackApprovalCards):
 
     def _sync(self, client, brief: dict) -> None:
         brief_id, channel_id = brief["brief_id"], brief["channel_id"]
+        imported = self.team.imported_input(brief_id) if brief["tracking_scenario"] == "imported" else None
+        if imported is None and brief["tracking_scenario"] == "imported":
+            raise workflow.NotFoundError("real-data input is missing")
         jobs, items, handoffs = self.team.snapshot(brief_id)
         thread_ts = brief["message_ts"]
         new_report = thread_ts is None
         if new_report:
-            text, blocks = _report(jobs, items, handoffs)
+            text, blocks = _report(jobs, items, handoffs, imported=imported)
             message = client.chat_postMessage(channel=channel_id, text=text, blocks=blocks)
             thread_ts = message["ts"]
             with closing(get_conn(self.db_path)) as conn, conn:
@@ -444,7 +542,10 @@ class SlackTeamBriefs(SlackApprovalCards):
                 state = workflow.get_approval_state(item["request_id"], self.db_path)
                 text, blocks = render_card({
                     **state, "command": CONTENT_COMMAND, "output": item["output"], "actions": {},
-                    "card_title": "한도윤 · 검토용 콘텐츠 초안 · 합성 데이터",
+                    "card_title": (
+                        "한도윤 · 검토용 콘텐츠 초안 · 실제 검색어"
+                        if imported else "한도윤 · 검토용 콘텐츠 초안 · 합성 데이터"
+                    ),
                     "role": (
                         "외부 발행 전 콘텐츠·법무 승인 필요"
                         if item["output"].get("requires_legal_before_publish") else "팀 브리핑에서 초안 확인"
@@ -461,6 +562,7 @@ class SlackTeamBriefs(SlackApprovalCards):
             text, blocks = _report(
                 jobs, items, handoffs,
                 permalink=lambda work_id: self._message_link(client, channel_id, message_ids[work_id]),
+                imported=imported,
             )
             client.chat_update(channel=channel_id, ts=thread_ts, text=text, blocks=blocks)
         with closing(get_conn(self.db_path)) as conn, conn:

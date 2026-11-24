@@ -159,6 +159,15 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
             retry_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (brief_id, stage)
         );
+        CREATE TABLE IF NOT EXISTS team_brief_inputs (
+            input_id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            brief_id TEXT UNIQUE REFERENCES team_briefs(brief_id)
+        );
         CREATE TABLE IF NOT EXISTS team_brief_replies (
             brief_id TEXT NOT NULL REFERENCES team_briefs(brief_id),
             reply_key TEXT NOT NULL,

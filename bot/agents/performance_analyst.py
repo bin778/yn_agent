@@ -14,6 +14,7 @@ steps 매핑:
   record     → workflow.create_work_item()
 """
 import json
+from decimal import Decimal
 
 from ..loaders import build_system_prompt
 from ..fake_data import get_fake_ads_data
@@ -24,6 +25,26 @@ from ..workflow import create_work_item
 from ..config import USE_FAKE_DATA
 
 AGENT_ID = "performance_analyst"
+
+
+def record_imported_analysis(data: dict, issue: str | None, *, db_path, record_work_item) -> None:
+    if issue:
+        output = {"halted": True, "reason": issue}
+    else:
+        cost, conversions = Decimal(data["cost"]), Decimal(data["conversions"])
+        clicks, impressions = data["clicks"], data["impressions"]
+        ctr = f"{Decimal(clicks) * 100 / impressions:.2f}%" if impressions else "계산 불가"
+        cpc = f"₩{cost / clicks:,.0f}" if clicks else "계산 불가"
+        cpa = f"₩{cost / conversions:,.0f}" if conversions else "계산 불가"
+        output = {
+            "historical_summary": True, "title": "광고 성과 요약",
+            "reason": f"노출 {impressions:,}회 · 클릭 {clicks:,}회\nCTR {ctr} · CPC {cpc} · CPA {cpa}",
+        }
+    record_work_item(
+        db_path=db_path, agent_id=AGENT_ID, output=output,
+        routed_to="dev_team.queue" if issue else "performance_review.queue",
+        model_version="policy-engine/no-llm", input_summary="verified_input:advertising",
+    )
 
 
 def _format_history(db_path=None) -> str:

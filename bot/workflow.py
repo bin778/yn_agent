@@ -120,6 +120,9 @@ def policy_for(
             risk_level="high" if high else "standard",
         )
     if agent_id == "performance_analyst":
+        if output.get("historical_summary"):
+            return ApprovalPolicy("performance_historical_summary", (), dt.timedelta(days=1), None, None,
+                                  initial_status="recorded")
         if output.get("halted"):
             return ApprovalPolicy("performance_halted", (), dt.timedelta(days=1), None, None,
                                   risk_level="high", initial_status="halted")

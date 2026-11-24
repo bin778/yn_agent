@@ -31,20 +31,26 @@ def _format_history(agent_id: str, db_path=None) -> str:
     return "\n".join(lines)
 
 
-def run_daily_keyword_scan(*, db_path=None, record_work_item=None) -> list[dict]:
+def run_daily_keyword_scan(*, db_path=None, record_work_item=None, search_data=None) -> list[dict]:
     """
     routine.yaml의 daily_keyword_scan 트리거가 실행하는 작업.
     반환값: [{"item", "target", "work_item_id", "version", "request_id"}, ...]
     """
     record = record_work_item or create_work_item
     system_prompt = build_system_prompt(AGENT_ID)
-    data = get_fake_search_data()
-    history_text = _format_history(AGENT_ID, db_path)
+    data = get_fake_search_data() if search_data is None else search_data
+    history_text = _format_history(AGENT_ID, db_path) if search_data is None else "(제출한 보고서만 사용)"
+    source_rule = (
+        "제출된 검색어만 사용하세요. impressions는 보고 기간 광고 노출수입니다. "
+        "전체 검색량을 추정할 근거가 없으므로 estimated_search_volume은 0으로 두세요."
+        if search_data is not None else ""
+    )
 
     user_prompt = f"""아래는 최근 검색 데이터입니다. SOUL.md의 판단 원칙과 컴플라이언스 규정에 따라
 각 항목의 urgency_level, compliance_risk를 판정하고 JSON으로 응답하세요.
 고위험 후보에는 장소·사건·개인을 제외한 일반 검토용 주제에 맞게 draft_topic_category를 선택하세요.
 선택지는 investigation(수사), sexual_offense(성범죄), traffic(교통), appeal(불복), settlement(합의), general(일반)입니다.
+{source_rule}
 
 # 최근 작업 이력 (패턴 참고용)
 {history_text}
@@ -60,13 +66,20 @@ def run_daily_keyword_scan(*, db_path=None, record_work_item=None) -> list[dict]
     )
 
     routed_results = []
+    submitted_terms = {row["term"]: row["impressions"] for row in search_data} if search_data is not None else None
     for item in result.items:
+        output = item.model_dump()
+        if submitted_terms is not None:
+            if item.keyword not in submitted_terms:
+                continue
+            item = item.model_copy(update={"estimated_search_volume": 0})
+            output = {**item.model_dump(), "reported_impressions": submitted_terms.pop(item.keyword)}
         # config.md classify 규칙: compliance_risk == high → compliance_review.queue
         target = "compliance_review.queue" if item.compliance_risk == "high" else "content_editor.inbox"
 
         workflow_ref = record(
             agent_id=AGENT_ID,
-            output=item.model_dump(),
+            output=output,
             routed_to=target,
             model_version=get_model_identity(),
             input_summary=item.keyword,

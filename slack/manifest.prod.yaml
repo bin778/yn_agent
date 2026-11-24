@@ -15,13 +15,14 @@ features:
       should_escape: false
     - command: /hermes-team
       description: 주간 콘텐츠·광고 브리핑을 요청합니다
-      usage_hint: brief [normal|critical|stale|missing|zero]
+      usage_hint: brief [csv|text|normal|critical|stale|missing|zero]
       should_escape: false
 oauth_config:
   scopes:
     bot:
       - chat:write
       - commands
+      - files:read
 settings:
   interactivity:
     is_enabled: true

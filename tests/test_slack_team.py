@@ -1,4 +1,5 @@
 import datetime as dt
+import io
 import tempfile
 import unittest
 from contextlib import closing
@@ -12,6 +13,7 @@ from bot.fake_data import get_fake_tracking_data
 from bot.llm_client import CodexTimeoutError
 from bot.schemas import DataAssistantOutput, KeywordAnalystOutput, PerformanceAnalystOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
+from bot.slack_adapter.brief_input import CONFIRM, MODAL
 from bot.slack_adapter.config import SlackMapping, SlackSettings
 from bot.slack_adapter.team import COMMAND, DRAFT_RETRY_ACTION, PERFORMANCE_RETRY_ACTION, SlackTeamBriefs
 
@@ -29,10 +31,11 @@ class SlackTeamTest(unittest.TestCase):
                     "UCONTENT": frozenset({"content_approver"})}, deps.mapping.queue_channels,
         )
         self.briefs = self.new_worker()
-        self.slash, self.actions = {}, {}
+        self.slash, self.actions, self.views = {}, {}, {}
         app = Mock()
         app.command.side_effect = lambda name: lambda fn: self.slash.setdefault(name, fn)
         app.action.side_effect = lambda name: lambda fn: self.actions.setdefault(name, fn)
+        app.view.side_effect = lambda name: lambda fn: self.views.setdefault(name, fn)
         register_handlers(app, deps, team_briefs=self.briefs)
         self.client = Mock()
         self.client.chat_postMessage.side_effect = (
@@ -76,7 +79,109 @@ class SlackTeamTest(unittest.TestCase):
             "team_id": "TTEAM", "channel_id": "CCHANNEL", "user_id": "UKEYWORD",
             "trigger_id": "request", "text": "brief",
         }
-        self.slash[COMMAND](ack=Mock(), command={**command, **changes}, respond=Mock())
+        self.slash[COMMAND](ack=Mock(), command={**command, **changes}, respond=Mock(), client=self.client)
+
+    def submit_real(
+        self, mode, *, complete=False, ads_timezone="Asia/Seoul", with_keywords=False,
+        event_period="", file_owner="UKEYWORD",
+    ):
+        self.submit(text=f"brief {mode}")
+        view = self.client.views_open.call_args.kwargs["view"]
+        tables = {
+            "sessions": "날짜,세션수\n2026-10-25,12",
+            "events": event_period + "날짜,이벤트 이름,이벤트 수\n2026-10-25,form_submit,0\n2026-10-25,home_kakao_click,3",
+            "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",
+        }
+        if with_keywords:
+            tables["keywords"] = "날짜,검색어,노출수\n2026-10-25,상담 준비,70"
+        inputs = {key: {"value": text} if mode == "text" else {"files": [{"id": key}]}
+                  for key, text in tables.items()}
+        inputs.update(
+            start={"selected_date": "2026-10-25"}, end={"selected_date": "2026-10-25"},
+            ga_timezone={"value": "Asia/Seoul"}, ads_timezone={"value": ads_timezone},
+            complete={"selected_option": {"value": "complete" if complete else "unknown"}},
+        )
+        view["state"] = {"values": {key: {key: value} for key, value in inputs.items()}}
+        body = {"team": {"id": "TTEAM"}, "user": {"id": "UKEYWORD"}, "view": view}
+        self.client.token = "test-bot-token"
+        self.client.files_info.side_effect = lambda *, file: {"file": {
+            "user": file_owner, "name": f"{file}.csv",
+            "url_private_download": f"https://files.slack.com/files-pri/{file}",
+        }}
+
+        def fetch(request, *, timeout):
+            self.assertEqual(request.get_header("Authorization"), "Bearer test-bot-token")
+            return io.BytesIO(tables[request.full_url.rsplit("/", 1)[-1]].encode("utf-8-sig"))
+
+        with patch("bot.slack_adapter.brief_input.build_opener") as opener:
+            opener.return_value.open.side_effect = fetch
+            self.views[MODAL](ack=Mock(), body=body, client=self.client)
+        expected_downloads = len(tables) if mode == "csv" and file_owner == "UKEYWORD" else 0
+        self.assertEqual(opener.return_value.open.call_count, expected_downloads)
+        preview = self.client.chat_postEphemeral.call_args.kwargs
+        self.assertEqual(preview["user"], "UKEYWORD")
+        self.client.chat_postMessage.assert_not_called()
+        self.assertFalse(self.briefs.process_next(self.client))
+        return preview
+
+    def confirm_real(self, preview, user="UKEYWORD"):
+        button = preview["blocks"][-1]["elements"][0]
+        response = Mock()
+        self.actions[CONFIRM](
+            ack=Mock(), body={"team": {"id": "TTEAM"}, "channel": {"id": "CCHANNEL"}, "user": {"id": user}},
+            action=button, respond=response,
+        )
+        return response.call_args.kwargs["text"]
+
+    def test_explicit_text_zero_and_unconfirmed_data_hold(self):
+        preview = self.submit_real("text")
+        self.assertIn("폼 제출 0회", preview["text"])
+        self.assertIn("광고 분석 보류", preview["text"])
+        self.assertIn("유효한 미리보기", self.confirm_real(preview, user="UCONTENT"))
+        self.assertEqual(self.confirm_real(preview), self.confirm_real(preview))
+        self.drain()
+        report = self.pm_card()
+        self.assertIn("직접 입력", report["text"])
+        self.assertIn("집계 완료가 미확인", report["text"])
+        self.assertIn("키워드 분석 대기 · 검색어 보고서 필요", report["text"])
+        replies = self.client.chat_postMessage.call_args_list[1:]
+        self.assertEqual(len(replies), 2)
+        self.assertTrue(all(call.kwargs["thread_ts"] == report["ts"] for call in replies))
+        for model in self.models.values():
+            model.assert_not_called()
+
+    def test_csv_confirmation_routes_real_keywords_and_records_ad_metrics(self):
+        preview = self.submit_real("csv", complete=True, with_keywords=True)
+        self.assertIn("광고비 ₩2,070", preview["text"])
+        self.confirm_real(preview)
+        self.drain()
+        report = self.pm_card()
+        self.assertIn("실제 집계 CSV", report["text"])
+        self.assertIn("성과 분석 완료", report["text"])
+        self.assertIn("키워드 승인 대기", report["text"])
+        self.models["performance_analyst"].assert_not_called()
+        replies = self.client.chat_postMessage.call_args_list
+        self.assertTrue(any("CPA ₩1,035" in call.kwargs["text"] and call.kwargs["thread_ts"] == report["ts"]
+                            for call in replies[1:]))
+        self.keyword_action("UKEYWORD")
+        self.keyword_action("ULEGAL")
+        self.drain()
+        self.assertIn("검토용 초안 확인", self.pm_card()["text"])
+
+    def test_time_zone_mismatch_returns_private_correction(self):
+        preview = self.submit_real("text", ads_timezone="Etc/UTC")
+        self.assertIn("시간대가 다릅니다", preview["text"])
+        self.assertNotIn("blocks", preview)
+
+    def test_source_export_period_mismatch_identifies_event_file(self):
+        preview = self.submit_real("text", event_period="# 20261026-20261123\n")
+        self.assertIn("GA4 이벤트 자료의 원본 기간", preview["text"])
+        self.assertNotIn("blocks", preview)
+
+    def test_file_owned_by_another_user_is_never_downloaded(self):
+        preview = self.submit_real("csv", file_owner="ULEGAL")
+        self.assertIn("본인이 이 입력창에 첨부한 CSV", preview["text"])
+        self.assertNotIn("blocks", preview)
 
     def drain(self, worker=None):
         for _ in range(15):
