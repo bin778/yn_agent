@@ -16,6 +16,7 @@ steps 매핑:
 import json
 from decimal import Decimal
 
+from ..brief_inputs import comparison_text
 from ..loaders import build_system_prompt
 from ..fake_data import get_fake_ads_data
 from ..llm_client import call_structured, get_model_identity
@@ -27,6 +28,60 @@ from ..config import USE_FAKE_DATA
 AGENT_ID = "performance_analyst"
 
 
+def _signed_change(value: Decimal, prefix: str = "", suffix: str = "", *, places=None) -> str:
+    sign = "+" if value > 0 else "-" if value < 0 else ""
+    magnitude = f"{abs(value):,.{places}f}" if places is not None else f"{abs(value):,}"
+    return f"{sign}{prefix}{magnitude}{suffix}"
+
+
+def _weekly_ad_detail(data: dict) -> str:
+    comparison = data.get("comparison", {})
+    previous = comparison.get("previous")
+    if previous is None:
+        return comparison_text(data)
+    previous_conversions = Decimal(previous["conversions"])
+    current_conversions = Decimal(data["conversions"])
+    previous_cpa = Decimal(previous["cost"]) / previous_conversions if previous_conversions else None
+    current_cpa = Decimal(data["cost"]) / current_conversions if current_conversions else None
+    before = f"₩{previous_cpa:,.0f}" if previous_cpa is not None else "계산 불가 (전환 0건)"
+    after = f"₩{current_cpa:,.0f}" if current_cpa is not None else "계산 불가 (전환 0건)"
+    cpa = f"광고 CPA · {before} → {after}"
+    if previous_cpa is not None and current_cpa is not None:
+        cpa += f" ({_signed_change(current_cpa - previous_cpa, '₩', places=0)})"
+
+    lines = [comparison_text(data), cpa]
+    changes = comparison.get("ad_changes")
+    if changes is None:
+        return "\n".join(lines)
+    actions = []
+    for key, label, prefix, suffix, task in (
+        ("cost", "광고비", "₩", "", "게재량과 비용 변화가 있었던 광고 항목을 원본 보고서에서 확인하세요."),
+        ("conversions", "광고 전환수", "", "건", "전환 액션별 기록과 전환 지연 여부를 확인하세요."),
+    ):
+        largest = max(changes["daily"], key=lambda row: abs(Decimal(row[key])))
+        delta = Decimal(largest[key])
+        if delta:
+            actions.append(
+                f"{largest['previous_date']} → {largest['current_date']} {label} "
+                f"{_signed_change(delta, prefix, suffix)} (같은 요일 중 최대 변동). {task}"
+            )
+    campaign = changes["campaign"]
+    if campaign is not None:
+        campaign_cost = Decimal(campaign["cost"])
+        campaign_conversions = Decimal(campaign["conversions"])
+        if campaign_cost or campaign_conversions:
+            name = " ".join(campaign["name"].split())
+            actions.append(
+                f"캠페인 {name} · 광고비 {_signed_change(campaign_cost, '₩')}, "
+                f"광고 전환수 {_signed_change(campaign_conversions, suffix='건')}. "
+                "캠페인 변경 이력과 성과를 대조하세요."
+            )
+    if not actions:
+        actions.append("같은 요일끼리 비교한 일별 광고비와 광고 전환수의 차이가 0입니다. 다음 7일도 같은 기준으로 추적하세요.")
+    lines.extend(("다음 행동", *(f"{i}. {action}" for i, action in enumerate(actions, 1))))
+    return "\n".join(lines)
+
+
 def record_imported_analysis(data: dict, issue: str | None, *, db_path, record_work_item) -> None:
     if issue:
         output = {"halted": True, "reason": issue}
@@ -36,9 +91,12 @@ def record_imported_analysis(data: dict, issue: str | None, *, db_path, record_w
         ctr = f"{Decimal(clicks) * 100 / impressions:.2f}%" if impressions else "계산 불가"
         cpc = f"₩{cost / clicks:,.0f}" if clicks else "계산 불가"
         cpa = f"₩{cost / conversions:,.0f}" if conversions else "계산 불가"
+        reason = f"노출 {impressions:,}회 · 클릭 {clicks:,}회\nCTR {ctr} · CPC {cpc} · CPA {cpa}"
+        detail = _weekly_ad_detail(data)
         output = {
-            "historical_summary": True, "title": "광고 성과 요약",
-            "reason": f"노출 {impressions:,}회 · 클릭 {clicks:,}회\nCTR {ctr} · CPC {cpc} · CPA {cpa}",
+            "historical_summary": True,
+            "title": "광고 성과 비교·점검 제안" if data.get("comparison", {}).get("ad_changes") else "광고 성과 요약",
+            "reason": f"{reason}\n\n{detail}" if detail else reason,
         }
     record_work_item(
         db_path=db_path, agent_id=AGENT_ID, output=output,

@@ -173,11 +173,14 @@ class SlackTeamTest(unittest.TestCase):
         self.assertIn("시간대가 다릅니다", preview["text"])
         self.assertNotIn("blocks", preview)
 
-    def submit_week(self, mode, *, complete=True, include_previous=True, missing_previous_form=False):
+    def submit_week(
+        self, mode, *, complete=True, include_previous=True, missing_previous_form=False,
+        campaign=False, zero_previous_conversions=False,
+    ):
         tables = {
             "sessions": "날짜,세션수\n",
             "events": "날짜,이벤트 이름,이벤트 수\n",
-            "ads": "날짜,전환수,노출수,클릭수,비용\n",
+            "ads": "날짜,전환수,노출수,클릭수,비용" + (",캠페인" if campaign else "") + "\n",
         }
         first = 6 if include_previous else 14
         for day in range(first, 21):
@@ -187,7 +190,10 @@ class SlackTeamTest(unittest.TestCase):
             if not (missing_previous_form and day == 7):
                 tables["events"] += f"{date},form_submit,{0 if previous else 2}\n"
             tables["events"] += f"{date},home_kakao_click,{3 if previous else 1}\n"
-            tables["ads"] += f"{date},{'0.25' if previous else '1.5'},100,10,2070\n"
+            conversions = ("0" if zero_previous_conversions else "0.25") if previous else "1.5"
+            cost = 4070 if day == 20 and campaign else 2070
+            fields = f"{date},{conversions},100,10,{cost}"
+            tables["ads"] += fields + (",검색 캠페인" if campaign else "") + "\n"
         return self.submit_real(mode, tables=tables, start="2026-11-14", end="2026-11-20", complete=complete)
 
     def test_csv_uses_two_equal_weeks_and_keeps_conversion_metrics_separate(self):
@@ -200,6 +206,26 @@ class SlackTeamTest(unittest.TestCase):
             self.assertIn("GA4 폼 제출 · 0건 → 14건 (+14건)", text)
             self.assertIn("GA4 카카오톡 클릭 · 21회 → 7회 (-14회)", text)
             self.assertIn("광고 플랫폼 전환수 · 1.75건 → 10.5건 (+8.75건)", text)
+        reply = self.performance_reply()
+        self.assertIn("광고 CPA · ₩8,280 → ₩1,380 (-₩6,900)", reply["text"])
+        self.assertIn("2026-11-07 → 2026-11-14 광고 전환수 +1.25건", reply["text"])
+        self.assertIn("전환 액션별 기록과 전환 지연 여부를 확인하세요.", reply["text"])
+        self.assertNotIn("캠페인 변경 이력", reply["text"])
+
+    def performance_reply(self):
+        return next(call.kwargs for call in self.client.chat_postMessage.call_args_list
+                    if call.kwargs.get("thread_ts") == self.brief()["message_ts"]
+                    and call.kwargs["text"].startswith("김도현"))
+
+    def test_text_weekly_actions_include_a_comparable_campaign_and_handle_zero_conversion_cpa(self):
+        preview = self.submit_week("text", campaign=True, zero_previous_conversions=True)
+        self.confirm_real(preview)
+        self.drain()
+        reply = self.performance_reply()["text"]
+        self.assertIn("광고 CPA · 계산 불가 (전환 0건) → ₩1,570", reply)
+        self.assertIn("2026-11-13 → 2026-11-20 광고비 +₩2,000", reply)
+        self.assertIn("캠페인 검색 캠페인 · 광고비 +₩2,000, 광고 전환수 +10.5건", reply)
+        self.assertEqual(len([line for line in reply.splitlines() if line[:3] in ("1. ", "2. ", "3. ")]), 3)
 
     def test_text_comparison_excludes_missing_previous_events_without_treating_them_as_zero(self):
         preview = self.submit_week("text", missing_previous_form=True)
@@ -211,6 +237,11 @@ class SlackTeamTest(unittest.TestCase):
         preview = self.submit_week("csv", complete=False)
         self.assertIn("비교 보류 · 집계 완료가 미확인입니다.", preview["text"])
         self.assertNotIn("광고 플랫폼 전환수 ·", preview["text"])
+        self.confirm_real(preview)
+        self.drain()
+        reply = self.performance_reply()["text"]
+        self.assertIn("광고 제안 보류", reply)
+        self.assertNotIn("다음 행동", reply)
 
     def test_one_week_export_still_delivers_brief_with_comparison_on_hold(self):
         preview = self.submit_week("csv", include_previous=False)

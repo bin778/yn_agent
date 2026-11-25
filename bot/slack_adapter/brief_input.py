@@ -62,6 +62,8 @@ def make_view(mode, channel):
         hint = "필요한 열 · " + " / ".join(columns)
         if key == "events":
             hint += " · form_submit, home_kakao_click"
+        if key == "ads":
+            hint += " · 캠페인별 비교는 캠페인 열 포함"
         if key != "keywords":
             hint += " · 7일 비교에는 직전 7일도 같은 보고서에 포함"
         blocks.append(_input(key, label, element, optional=key == "keywords", hint=hint))

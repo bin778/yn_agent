@@ -248,7 +248,7 @@ def _detail(item: dict) -> str:
             "김도현 · 광고 제안 보류", output["reason"], output.get("next_action"),
         ]))
     if output.get("historical_summary"):
-        return "김도현 · 광고 성과 요약\n" + output["reason"]
+        return f"김도현 · {output.get('title', '광고 성과 요약')}\n{output['reason']}"
     return (
         f"김도현 · 광고 개선안 · {output['keyword']}\n"
         f"{output.get('campaign', '')} · {output['action']} {output['adjustment_percentage']:+d}%\n"

@@ -6,6 +6,7 @@ import csv
 import datetime as dt
 import io
 import re
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -111,7 +112,7 @@ def normalize(
         except (ValueError, OverflowError):
             raise InputError("원본 집계 시각은 보고 종료일 이후의 확인된 시각을 UTC 오프셋과 함께 입력해 주세요.") from None
 
-    current, _, campaign_level = _read_period(tables, first, last, ga_timezone)
+    current, _, current_ads = _read_period(tables, first, last, ga_timezone)
     data = {
         **current,
         "mode": mode, "start": first.isoformat(), "end": last.isoformat(), "timezone": ga_timezone,
@@ -127,10 +128,10 @@ def normalize(
         else:
             required = {kind: tables[kind] for kind in ("sessions", "events", "ads")}
             try:
-                previous, missing_events, previous_campaign_level = _read_period(
+                previous, missing_events, previous_ads = _read_period(
                     required, previous_start, previous_end, ga_timezone,
                 )
-                if campaign_level != previous_campaign_level:
+                if any(name for _, name in current_ads) != any(name for _, name in previous_ads):
                     raise InputError("광고 성과 자료의 계정 합계와 캠페인별 집계 단위를 맞춰 주세요.")
             except InputError as exc:
                 comparison["reason"] = str(exc)
@@ -139,13 +140,14 @@ def normalize(
                     key: None if key in missing_events else previous[key]
                     for key, _, _, _ in COMPARISON_METRICS
                 }
+                comparison["ad_changes"] = _advertising_changes(previous_ads, current_ads)
         data["comparison"] = comparison
     return data
 
 
 def _read_period(
     tables: dict[str, str], first: dt.date, last: dt.date, timezone: str,
-) -> tuple[dict, dict[str, int], bool]:
+) -> tuple[dict, dict[str, int], dict]:
     days = {first + dt.timedelta(days=i) for i in range((last - first).days + 1)}
     facts: dict[str, dict] = {}
     for kind, content in tables.items():
@@ -231,7 +233,45 @@ def _read_period(
         "cost": str(summary[3]), "warnings": warnings,
         "keywords": [{"term": term, "impressions": count} for term, count in
                      sorted(keywords.items(), key=lambda entry: (-entry[1], entry[0]))[:30]],
-    }, missing_events, True in campaign_levels
+    }, missing_events, ads
+
+
+def _advertising_changes(previous_ads: dict, current_ads: dict) -> dict:
+    def totals(rows):
+        by_day = defaultdict(lambda: [Decimal(0), Decimal(0)])
+        by_campaign = defaultdict(dict)
+        for (day, campaign), (conversions, _, _, cost) in rows.items():
+            by_day[day][0] += cost
+            by_day[day][1] += conversions
+            if campaign:
+                by_campaign[campaign][day] = (cost, conversions)
+        return by_day, by_campaign
+
+    def change(before, after):
+        before_cost, before_conversions = before
+        after_cost, after_conversions = after
+        return {"cost": str(after_cost - before_cost), "conversions": str(after_conversions - before_conversions)}
+
+    previous_days, previous_campaigns = totals(previous_ads)
+    current_days, current_campaigns = totals(current_ads)
+    daily = [
+        {"previous_date": day.isoformat(), "current_date": (day + WEEK).isoformat(),
+         **change(previous_days[day], current_days[day + WEEK])}
+        for day in sorted(previous_days)
+    ]
+    campaigns = []
+    for name in sorted(previous_campaigns.keys() & current_campaigns.keys()):
+        before, after = previous_campaigns[name], current_campaigns[name]
+        if len(before) != WEEK.days or len(after) != WEEK.days:
+            continue
+        before_totals = tuple(map(sum, zip(*before.values())))
+        after_totals = tuple(map(sum, zip(*after.values())))
+        campaigns.append({"name": name, **change(before_totals, after_totals)})
+    largest_campaign = max(
+        campaigns, default=None,
+        key=lambda row: (abs(Decimal(row["cost"])), abs(Decimal(row["conversions"]))),
+    )
+    return {"daily": daily, "campaign": largest_campaign}
 
 
 def comparison_text(data: dict) -> str:
