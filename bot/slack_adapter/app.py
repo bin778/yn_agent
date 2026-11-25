@@ -505,9 +505,17 @@ def main() -> int:
             keyword_mode = KeywordApprovalMode(raw_mode.strip())
         except ValueError:
             parser.error("HERMES_TEAM_KEYWORD_APPROVAL_MODE must be legal_before_draft or draft_advisory")
+        ga4_fetch = None
+        if os.environ.get("HERMES_GA4_ENABLED", "").strip().lower() == "true":
+            from functools import partial
+
+            from ..ga4_reports import fetch_report
+
+            property_id = os.environ.get("HERMES_GA4_PROPERTY_ID", "").strip()
+            ga4_fetch = partial(fetch_report, property_id)
         team_briefs = SlackTeamBriefs(
             deps.mapping, DB_PATH, draft_channel, approval_mode=drafts.approval_mode,
-            keyword_approval_mode=keyword_mode,
+            keyword_approval_mode=keyword_mode, ga4_fetch=ga4_fetch,
         )
     app = create_app(settings, deps, approval_demo, drafts=drafts, team_briefs=team_briefs)
     handler = SocketModeHandler(app, settings.app_token)

@@ -42,12 +42,19 @@ STAGE_LABELS = {"queued": "대기", "failed": "실패", "completed": "완료"}
 
 def _input_summary(data: dict) -> str:
     comparison = brief_inputs.comparison_text(data)
+    ga4 = data["mode"] == "ga4"
+    source = "GA4 Data API · " if ga4 else "GA4, "
+    ads = "광고 " if ga4 else ""
     return "\n".join((
-        f"출처 · GA4, {data.get('ads_source', '광고 성과 보고서')}"
+        f"출처 · {source}{data.get('ads_source', '광고 성과 보고서')}"
         + (" 및 검색어 보고서" if data["keywords"] else ""),
         f"보고 기간 · {data['start']} ~ {data['end']} ({data['timezone']})",
-        f"집계 완료 · {'확인' if data['complete'] else '미확인'}",
-        f"원본 집계 시각 · {seoul_time_label(data['collected_through']) if data['collected_through'] else '미확인'}",
+        f"{ads}집계 완료 · {'확인' if data['complete'] else '미확인'}",
+        f"{ads}원본 집계 시각 · {seoul_time_label(data['collected_through']) if data['collected_through'] else '미확인'}",
+        *([f"GA4 API 조회 시각 · {seoul_time_label(data['ga4_fetched_at'])}",
+           "GA4 원본 집계 완료 시각 · 미확인"] if ga4 else []),
+        *([f"GA4 이벤트 원본 CSV · 0건 확인 행 {data['ga4_verified_zeros']}개 보완"]
+          if ga4 and data.get("ga4_verified_zeros") else []),
         f"제출 처리 시각 · {seoul_time_label(data['imported_at'])}",
         brief_inputs.summary_text(data),
         *(["누락 · " + " / ".join(data["warnings"])] if data["warnings"] else []),
@@ -265,9 +272,10 @@ class SlackTeamBriefs(SlackApprovalCards):
 
     def __init__(
         self, mapping, db_path, channel_id, *, approval_mode,
-        keyword_approval_mode=workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT,
+        keyword_approval_mode=workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT, ga4_fetch=None,
     ):
         super().__init__(mapping, db_path)
+        self.ga4_fetch = ga4_fetch
         self.team = TeamBriefs(
             db_path, mapping.workspace_id, channel_id, approval_mode,
             keyword_approval_mode=keyword_approval_mode,
@@ -359,17 +367,21 @@ class SlackTeamBriefs(SlackApprovalCards):
             return
 
         words = command.get("text", "").strip().lower().split()
+        if words == ["brief", "ga4"] and self.ga4_fetch is None:
+            respond(response_type="ephemeral", text="GA4 API 입력이 비활성화되어 있습니다. /hermes-team brief csv를 사용해 주세요.")
+            return
         if len(words) == 2 and words[0] == "brief" and words[1] in brief_input.MODES:
             try:
                 client.views_open(trigger_id=command["trigger_id"], view=brief_input.make_view(words[1], command["channel_id"]))
             except SlackClientError as exc:
                 LOGGER.warning("Brief input modal failed error_type=%s", type(exc).__name__)
-                hint = " CSV 첨부에는 Hermes 앱의 files:read 권한이 필요합니다." if words[1] == "csv" else ""
+                hint = " CSV 첨부에는 Hermes 앱의 files:read 권한이 필요합니다." if words[1] in {"csv", "ga4"} else ""
                 respond(response_type="ephemeral", text="입력창을 열지 못했습니다." + hint)
             return
         if words != ["brief"] and (len(words) != 2 or words[0] != "brief" or words[1] not in BRIEF_SCENARIOS):
             scenarios = "|".join(BRIEF_SCENARIOS)
-            respond(response_type="ephemeral", text=f"/hermes-team brief [csv|text|{scenarios}]")
+            ga4 = "|ga4" if self.ga4_fetch is not None else ""
+            respond(response_type="ephemeral", text=f"/hermes-team brief [csv|text{ga4}|{scenarios}]")
             return
         scenario = words[-1] if len(words) == 2 else "normal"
         try:
@@ -398,7 +410,7 @@ class SlackTeamBriefs(SlackApprovalCards):
 
         blocks = None
         try:
-            data = brief_input.read_view(client, view, user, mode)
+            data = brief_input.read_view(client, view, user, mode, ga4_fetch=self.ga4_fetch)
             data = self.team.save_input(input_id, actor.actor_id, data)
             issue = brief_inputs.hold_reason(data)
             text = f"{brief_input.MODES[mode]} 검증\n{_input_summary(data)}"
@@ -428,8 +440,12 @@ class SlackTeamBriefs(SlackApprovalCards):
             actor = self._actor(body["team"]["id"], body["channel"]["id"], body["user"]["id"])
             if not actor.roles & REQUESTOR_ROLES:
                 raise workflow.AuthorizationError("team brief request role is missing")
-            brief_id = self.team.confirm_input(str(uuid.UUID(action["value"])), actor.actor_id)
+            brief_id = self.team.confirm_input(
+                str(uuid.UUID(action["value"])), actor.actor_id, allow_ga4=self.ga4_fetch is not None,
+            )
             text = f"실제 데이터 브리핑을 접수했습니다. 결과는 이 채널의 PM 스레드에 게시합니다. · {brief_id}"
+        except brief_inputs.InputError as exc:
+            text = str(exc)
         except (workflow.NotFoundError, workflow.AuthorizationError, SlackConfigurationError, KeyError, TypeError, ValueError):
             text = "본인이 제출한 유효한 미리보기에서 다시 확인해 주세요."
         except sqlite3.Error as exc:

@@ -81,16 +81,21 @@ def _rows(kind: str, content: str) -> list[dict]:
     return result
 
 
-def normalize(
-    tables: dict[str, str], *, start: str, end: str, ga_timezone: str, ads_timezone: str,
-    complete: bool, collected_through: str = "", mode: str, ads_source: str = "",
-) -> dict:
+def report_period(start: str, end: str) -> tuple[dt.date, dt.date]:
     try:
         first, last = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
     except ValueError:
         raise InputError("보고 기간의 시작일과 종료일을 선택해 주세요.") from None
     if not 0 <= (last - first).days < 92:
         raise InputError("보고 기간은 시작일부터 최대 92일입니다.")
+    return first, last
+
+
+def normalize(
+    tables: dict[str, str], *, start: str, end: str, ga_timezone: str, ads_timezone: str,
+    complete: bool, collected_through: str = "", mode: str, ads_source: str = "", ga4_report=None,
+) -> dict:
+    first, last = report_period(start, end)
     ga_timezone, ads_timezone = ga_timezone.strip(), ads_timezone.strip()
     for label, name in (("GA4", ga_timezone), ("광고 성과", ads_timezone)):
         try:
@@ -112,13 +117,18 @@ def normalize(
         except (ValueError, OverflowError):
             raise InputError("원본 집계 시각은 보고 종료일 이후의 확인된 시각을 UTC 오프셋과 함께 입력해 주세요.") from None
 
-    current, _, current_ads = _read_period(tables, first, last, ga_timezone)
+    current, _, current_ads = _read_period(tables, first, last, ga_timezone, from_ga4=ga4_report is not None)
     data = {
         **current,
         "mode": mode, "start": first.isoformat(), "end": last.isoformat(), "timezone": ga_timezone,
         "ads_source": " ".join(ads_source.split())[:80] or "광고 성과 보고서",
         "complete": complete, "collected_through": timestamp, "imported_at": utc_iso(),
     }
+    if ga4_report is not None:
+        data.update(
+            ga4_fetched_at=ga4_report.fetched_at, ga4_pending=ga4_report.pending,
+            ga4_verified_zeros=ga4_report.verified_zeros,
+        )
     if last - first == WEEK - dt.timedelta(days=1) and first >= dt.date.min + WEEK:
         previous_start, previous_end = first - WEEK, last - WEEK
         comparison = {"start": previous_start.isoformat(), "end": previous_end.isoformat()}
@@ -129,7 +139,7 @@ def normalize(
             required = {kind: tables[kind] for kind in ("sessions", "events", "ads")}
             try:
                 previous, missing_events, previous_ads = _read_period(
-                    required, previous_start, previous_end, ga_timezone,
+                    required, previous_start, previous_end, ga_timezone, from_ga4=ga4_report is not None,
                 )
                 if any(name for _, name in current_ads) != any(name for _, name in previous_ads):
                     raise InputError("광고 성과 자료의 계정 합계와 캠페인별 집계 단위를 맞춰 주세요.")
@@ -145,8 +155,24 @@ def normalize(
     return data
 
 
+def _check_csv_scope(content: str, label: str, first: dt.date, last: dt.date, timezone: str) -> None:
+    timezone_header = re.search(r"^#\s*(?:시간대|Time\s*zone)\s*:\s*(\S+)\s*$", content, re.M | re.I)
+    if timezone_header and timezone_header[1] != timezone:
+        raise InputError(f"{label} 자료의 시간대가 입력한 시간대와 다릅니다.")
+    period_header = re.search(r"^#[ \t]*(\d{8})[ \t]*-[ \t]*(\d{8})[ \t]*\r?$", content, re.M)
+    if period_header:
+        try:
+            report_start, report_end = map(parse_date, period_header.groups())
+            if not report_start <= first <= last <= report_end:
+                raise ValueError
+        except ValueError:
+            raise InputError(
+                f"{label} 자료의 원본 기간이 선택한 보고 기간을 포함하지 않습니다. 기간을 맞춰 다시 제출해 주세요."
+            ) from None
+
+
 def _read_period(
-    tables: dict[str, str], first: dt.date, last: dt.date, timezone: str,
+    tables: dict[str, str], first: dt.date, last: dt.date, timezone: str, *, from_ga4: bool = False,
 ) -> tuple[dict, dict[str, int], dict]:
     days = {first + dt.timedelta(days=i) for i in range((last - first).days + 1)}
     facts: dict[str, dict] = {}
@@ -154,19 +180,7 @@ def _read_period(
         label = FIELDS[kind][0]
         parsed: dict = {}
         source_days: set[dt.date] = set()
-        timezone_header = re.search(r"^#\s*(?:시간대|Time\s*zone)\s*:\s*(\S+)\s*$", content, re.M | re.I)
-        if timezone_header and timezone_header[1] != timezone:
-            raise InputError(f"{label} 자료의 시간대가 입력한 시간대와 다릅니다.")
-        period_header = re.search(r"^#[ \t]*(\d{8})[ \t]*-[ \t]*(\d{8})[ \t]*\r?$", content, re.M)
-        if period_header:
-            try:
-                report_start, report_end = map(parse_date, period_header.groups())
-                if not report_start <= first <= last <= report_end:
-                    raise ValueError
-            except ValueError:
-                raise InputError(
-                    f"{label} 자료의 원본 기간이 선택한 보고 기간을 포함하지 않습니다. 기간을 맞춰 다시 제출해 주세요."
-                ) from None
+        _check_csv_scope(content, label, first, last, timezone)
         try:
             for row in _rows(kind, content):
                 day = parse_date(row["날짜"])
@@ -206,7 +220,7 @@ def _read_period(
             if missing:
                 shown = ", ".join(day.isoformat() for day in missing[:5])
                 raise InputError(f"{label} 자료에 보고 기간의 날짜가 빠져 있습니다 ({shown}).")
-        elif source_days and (min(source_days) > last or max(source_days) < first):
+        elif not (from_ga4 and kind == "events") and source_days and (min(source_days) > last or max(source_days) < first):
             raise InputError(f"{label} 자료에 선택한 보고 기간의 행이 없습니다.")
         facts[kind] = parsed
 
@@ -298,9 +312,13 @@ def comparison_text(data: dict) -> str:
 
 
 def hold_reason(data: dict) -> str | None:
+    if data.get("ga4_pending"):
+        return "GA4 집계 대기 · 보고 종료일이 끝난 뒤 48시간 이내입니다."
     if not data["complete"]:
         return "집계 완료가 미확인입니다."
     if data["warnings"]:
+        if data["mode"] == "ga4":
+            return "GA4 필수 이벤트의 일별 행이 빠져 있습니다. 원본 GA4 이벤트 CSV에서 0건을 확인할 수 있으면 첨부해 주세요."
         return "GA4 필수 이벤트의 일별 행이 빠져 있습니다. 유효한 0건은 숫자 0으로 입력해 주세요."
     return None
 

@@ -165,7 +165,6 @@ Slack에서 `/hermes-test status`를 실행한 뒤 `keyword`, `content`, `perfor
 테스트 카드를 확인합니다. 설정 및 직접 테스트 절차는
 [docs/phase3/slack_test_foundation.md](./docs/phase3/slack_test_foundation.md)를 참고하세요.
 
-
 ## Slack 팀 브리핑
 
 `/hermes-team brief`는 하나의 스레드에 콘텐츠 제작팀, 데이터 분석팀, 퍼포먼스 마케팅팀의 결과를 모읍니다. Slack 앱에 운영 매니페스트의 명령을 등록하고 `SLACK_TEAM_BRIEFS_ENABLED=true`로 설정하면 `SLACK_DRAFT_CHANNEL_ID` 채널에서 사용할 수 있습니다.
@@ -179,3 +178,17 @@ Slack에서 `/hermes-test status`를 실행한 뒤 `keyword`, `content`, `perfor
 - 팀 요청과 단계 실행 상태는 SQLite에 저장됩니다. Slack 전송에 실패해도 저장된 분석을 다시 실행하지 않습니다.
 
 로컬 검증은 `python -m unittest tests.test_slack_team -v`로 실행합니다.
+
+### GA4 API와 광고 CSV로 브리핑
+
+1. Google Cloud에서 Analytics Data API, IAM API, Resource Manager API, IAM Service Account Credentials API, Security Token Service API를 활성화합니다. [AWS 역할과 Google Cloud의 Workload Identity Federation](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-other-clouds)을 구성하고 Hermes EC2 역할에만 전용 서비스 계정 사용을 허용합니다. GA4 속성의 액세스 관리에서 서비스 계정에 뷰어 권한을 추가합니다.
+2. EC2에 Python 의존성을 설치합니다. EC2용 WIF 인증 설정 JSON을 Hermes 서비스가 읽을 수 있는 경로에 두고, `GOOGLE_APPLICATION_CREDENTIALS`에 경로, `HERMES_GA4_PROPERTY_ID`에 GA4 속성 ID를 지정합니다. `HERMES_GA4_ENABLED=false` 상태에서 Hermes 서비스와 같은 사용자 및 인증 환경으로 대조를 실행합니다.
+
+   ```sh
+   /opt/hermes/venv/bin/python -m scripts.compare_ga4_report \
+     --start 2026-11-14 --end 2026-11-20 \
+     --sessions /path/to/sessions.csv --events /path/to/events.csv
+   ```
+
+3. 대조 성공 뒤 `HERMES_GA4_ENABLED=true`로 설정하고 Slack 서비스를 재시작합니다. `/hermes-team brief ga4`에 Google Ads CSV를 첨부하면 비공개 미리보기를 받습니다. 보고 종료일이 끝난 뒤 48시간 이내이거나 GA4 필수 이벤트 일별 행이 빠지면 광고 제안을 보류합니다. 같은 기간의 GA4 이벤트 원본 CSV를 선택 첨부하면 API에서 빠진 행 중 CSV에 숫자 0이 있는 행만 보완합니다. API와 CSV의 이벤트 수가 다르면 검증을 중단합니다. 원본에서도 확인되지 않은 행은 누락으로 남습니다.
+4. 롤백할 때는 `HERMES_GA4_ENABLED=false`로 전환하고 서비스를 재시작합니다.

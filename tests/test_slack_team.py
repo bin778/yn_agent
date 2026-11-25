@@ -6,7 +6,8 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from bot import workflow
+from bot import brief_inputs, workflow
+from bot.ga4_reports import Report
 from bot.agents.content_editor import SlackContentEditorOutput
 from bot.db import get_conn, get_tracking_status, upsert_tracking_status, utc_now
 from bot.fake_data import get_fake_tracking_data
@@ -116,7 +117,7 @@ class SlackTeamTest(unittest.TestCase):
         with patch("bot.slack_adapter.brief_input.build_opener") as opener:
             opener.return_value.open.side_effect = fetch
             self.views[MODAL](ack=Mock(), body=body, client=self.client)
-        expected_downloads = len(tables) if mode == "csv" and file_owner == "UKEYWORD" else 0
+        expected_downloads = len(tables) if mode in {"csv", "ga4"} and file_owner == "UKEYWORD" else 0
         self.assertEqual(opener.return_value.open.call_count, expected_downloads)
         preview = self.client.chat_postEphemeral.call_args.kwargs
         self.assertEqual(preview["user"], "UKEYWORD")
@@ -167,6 +168,76 @@ class SlackTeamTest(unittest.TestCase):
         self.keyword_action("ULEGAL")
         self.drain()
         self.assertIn("검토용 초안 확인", self.pm_card()["text"])
+
+    def test_ga4_mode_runs_existing_campaign_proposal_from_hybrid_input(self):
+        dates = [f"202611{day:02}" for day in range(7, 21)]
+        missing = ("20261114", "form_submit")
+        self.briefs.ga4_fetch = Mock(return_value=Report(
+            {day: 100 for day in dates},
+            {(day, event): 0 for day in dates for event in brief_inputs.EVENT_NAMES if (day, event) != missing},
+            "2026-11-25T00:00:00+00:00", False,
+        ))
+        ads = "날짜,전환수,노출수,클릭수,비용,캠페인\n" + "".join(
+            f"{day},1,10,2,{100 if day < '20261114' else 200},검색 캠페인\n" for day in dates
+        )
+        preview = self.submit_real(
+            "ga4", complete=True,
+            tables={"ads": ads, "events": "날짜,이벤트 이름,이벤트 수\n20261114,form_submit,0\n"},
+            start="2026-11-14", end="2026-11-20",
+        )
+        self.briefs.ga4_fetch.assert_called_once_with("2026-11-14", "2026-11-20")
+        self.assertIn("GA4 Data API · Google Ads CSV", preview["text"])
+        self.assertIn("GA4 API 조회 시각", preview["text"])
+        self.assertIn("0건 확인 행 1개 보완", preview["text"])
+        self.assertIn("광고 집계 완료 · 확인", preview["text"])
+        self.confirm_real(preview)
+        self.drain()
+        self.assertIn("검색 캠페인 · 광고비 +₩700", self.performance_reply()["text"])
+
+    def test_ga4_permission_error_never_produces_confirmation(self):
+        self.briefs.ga4_fetch = Mock(side_effect=brief_inputs.InputError("GA4 조회 권한 없음"))
+        preview = self.submit_real("ga4", tables={"ads": "required CSV"})
+        self.assertIn("GA4 조회 권한 없음", preview["text"])
+        self.assertNotIn("blocks", preview)
+
+    def test_ga4_pending_holds_and_can_be_disabled_before_confirmation(self):
+        day = "20261025"
+        self.briefs.ga4_fetch = Mock(return_value=Report(
+            {day: 100}, {(day, event): 0 for event in brief_inputs.EVENT_NAMES},
+            "2026-10-26T00:00:00+00:00", True,
+        ))
+        preview = self.submit_real("ga4", complete=True, tables={
+            "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",
+        })
+        self.assertIn("광고 분석 보류 · GA4 집계 대기", preview["text"])
+        fetch = self.briefs.ga4_fetch
+        self.briefs.ga4_fetch = None
+        self.assertIn("비활성화", self.confirm_real(preview))
+        self.assertFalse(self.briefs.process_next(self.client))
+        self.briefs.ga4_fetch = fetch
+        self.confirm_real(preview)
+        self.drain()
+        self.assertIn("GA4 집계 대기", self.performance_reply()["text"])
+
+    def test_ga4_mode_holds_for_missing_event(self):
+        self.assert_ga4_hold({"form_submit": 0}, complete=True, reason="GA4 필수 이벤트의 일별 행")
+
+    def test_ga4_mode_holds_for_unconfirmed_ads(self):
+        self.assert_ga4_hold(dict.fromkeys(brief_inputs.EVENT_NAMES, 0), complete=False, reason="집계 완료가 미확인")
+
+    def assert_ga4_hold(self, events, *, complete, reason):
+        day = "20261025"
+        self.briefs.ga4_fetch = Mock(return_value=Report(
+            {day: 100}, {(day, event): value for event, value in events.items()},
+            "2026-10-30T00:00:00+00:00", False,
+        ))
+        preview = self.submit_real("ga4", complete=complete, tables={
+            "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",
+        })
+        self.assertIn(reason, preview["text"])
+        self.confirm_real(preview)
+        self.drain()
+        self.assertIn(reason, self.performance_reply()["text"])
 
     def test_time_zone_mismatch_returns_private_correction(self):
         preview = self.submit_real("text", ads_timezone="Etc/UTC")
