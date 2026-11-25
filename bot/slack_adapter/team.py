@@ -41,6 +41,7 @@ STAGE_LABELS = {"queued": "대기", "failed": "실패", "completed": "완료"}
 
 
 def _input_summary(data: dict) -> str:
+    comparison = brief_inputs.comparison_text(data)
     return "\n".join((
         f"출처 · GA4, {data.get('ads_source', '광고 성과 보고서')}"
         + (" 및 검색어 보고서" if data["keywords"] else ""),
@@ -50,6 +51,7 @@ def _input_summary(data: dict) -> str:
         f"제출 처리 시각 · {seoul_time_label(data['imported_at'])}",
         brief_inputs.summary_text(data),
         *(["누락 · " + " / ".join(data["warnings"])] if data["warnings"] else []),
+        *([comparison] if comparison else []),
     ))
 
 

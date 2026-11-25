@@ -83,11 +83,11 @@ class SlackTeamTest(unittest.TestCase):
 
     def submit_real(
         self, mode, *, complete=False, ads_timezone="Asia/Seoul", with_keywords=False,
-        event_period="", file_owner="UKEYWORD",
+        event_period="", file_owner="UKEYWORD", tables=None, start="2026-10-25", end="2026-10-25",
     ):
         self.submit(text=f"brief {mode}")
         view = self.client.views_open.call_args.kwargs["view"]
-        tables = {
+        tables = tables or {
             "sessions": "날짜,세션수\n2026-10-25,12",
             "events": event_period + "날짜,이벤트 이름,이벤트 수\n2026-10-25,form_submit,0\n2026-10-25,home_kakao_click,3",
             "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",
@@ -97,7 +97,7 @@ class SlackTeamTest(unittest.TestCase):
         inputs = {key: {"value": text} if mode == "text" else {"files": [{"id": key}]}
                   for key, text in tables.items()}
         inputs.update(
-            start={"selected_date": "2026-10-25"}, end={"selected_date": "2026-10-25"},
+            start={"selected_date": start}, end={"selected_date": end},
             ga_timezone={"value": "Asia/Seoul"}, ads_timezone={"value": ads_timezone},
             complete={"selected_option": {"value": "complete" if complete else "unknown"}},
         )
@@ -172,6 +172,52 @@ class SlackTeamTest(unittest.TestCase):
         preview = self.submit_real("text", ads_timezone="Etc/UTC")
         self.assertIn("시간대가 다릅니다", preview["text"])
         self.assertNotIn("blocks", preview)
+
+    def submit_week(self, mode, *, complete=True, include_previous=True, missing_previous_form=False):
+        tables = {
+            "sessions": "날짜,세션수\n",
+            "events": "날짜,이벤트 이름,이벤트 수\n",
+            "ads": "날짜,전환수,노출수,클릭수,비용\n",
+        }
+        first = 6 if include_previous else 14
+        for day in range(first, 21):
+            date = f"2026-11-{day:02d}"
+            previous = day < 14
+            tables["sessions"] += f"{date},{10 if previous else 12}\n"
+            if not (missing_previous_form and day == 7):
+                tables["events"] += f"{date},form_submit,{0 if previous else 2}\n"
+            tables["events"] += f"{date},home_kakao_click,{3 if previous else 1}\n"
+            tables["ads"] += f"{date},{'0.25' if previous else '1.5'},100,10,2070\n"
+        return self.submit_real(mode, tables=tables, start="2026-11-14", end="2026-11-20", complete=complete)
+
+    def test_csv_uses_two_equal_weeks_and_keeps_conversion_metrics_separate(self):
+        preview = self.submit_week("csv")
+        self.confirm_real(preview)
+        self.drain()
+        for text in (preview["text"], self.pm_card()["text"]):
+            self.assertIn("2026-11-07 ~ 2026-11-13 → 2026-11-14 ~ 2026-11-20", text)
+            self.assertIn("GA4 세션 · 70회 → 84회 (+14회)", text)
+            self.assertIn("GA4 폼 제출 · 0건 → 14건 (+14건)", text)
+            self.assertIn("GA4 카카오톡 클릭 · 21회 → 7회 (-14회)", text)
+            self.assertIn("광고 플랫폼 전환수 · 1.75건 → 10.5건 (+8.75건)", text)
+
+    def test_text_comparison_excludes_missing_previous_events_without_treating_them_as_zero(self):
+        preview = self.submit_week("text", missing_previous_form=True)
+        self.assertIn("GA4 폼 제출 · 비교 보류 (직전 기간 일별 행 누락)", preview["text"])
+        self.assertIn("GA4 카카오톡 클릭 · 21회 → 7회", preview["text"])
+        self.assertIn("광고 플랫폼 전환수 · 1.75건 → 10.5건", preview["text"])
+
+    def test_week_comparison_waits_for_collection_confirmation(self):
+        preview = self.submit_week("csv", complete=False)
+        self.assertIn("비교 보류 · 집계 완료가 미확인입니다.", preview["text"])
+        self.assertNotIn("광고 플랫폼 전환수 ·", preview["text"])
+
+    def test_one_week_export_still_delivers_brief_with_comparison_on_hold(self):
+        preview = self.submit_week("csv", include_previous=False)
+        self.assertIn("비교 보류 · GA4 세션 자료에 보고 기간의 날짜가 빠져 있습니다", preview["text"])
+        self.confirm_real(preview)
+        self.drain()
+        self.assertIn("성과 분석 완료", self.pm_card()["text"])
 
     def test_source_export_period_mismatch_identifies_event_file(self):
         preview = self.submit_real("text", event_period="# 20261026-20261123\n")

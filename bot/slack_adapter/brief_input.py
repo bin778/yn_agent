@@ -46,7 +46,7 @@ def make_view(mode, channel):
         }),
         _input("complete", "원본 집계 상태", {
             "type": "static_select", "options": options, "initial_option": options[0],
-        }),
+        }, hint="직전 7일과 비교할 때는 두 기간의 집계 상태를 확인해 주세요."),
         _input("collected_through", "원본 집계 시각", {
             "type": "plain_text_input", "placeholder": _plain("2026-11-21T09:00:00+09:00"), "max_length": 40,
         }, optional=True),
@@ -62,6 +62,8 @@ def make_view(mode, channel):
         hint = "필요한 열 · " + " / ".join(columns)
         if key == "events":
             hint += " · form_submit, home_kakao_click"
+        if key != "keywords":
+            hint += " · 7일 비교에는 직전 7일도 같은 보고서에 포함"
         blocks.append(_input(key, label, element, optional=key == "keywords", hint=hint))
     return {
         "type": "modal", "callback_id": MODAL, "title": _plain(MODES[mode]),

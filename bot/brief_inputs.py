@@ -18,6 +18,16 @@ FIELDS = {
     "keywords": ("검색어", ("날짜", "검색어", "노출수")),
 }
 EVENT_NAMES = ("form_submit", "home_kakao_click")
+WEEK = dt.timedelta(days=7)
+COMPARISON_METRICS = (
+    ("sessions", "GA4 세션", "", "회"),
+    ("form_submit", "GA4 폼 제출", "", "건"),
+    ("home_kakao_click", "GA4 카카오톡 클릭", "", "회"),
+    ("impressions", "광고 노출", "", "회"),
+    ("clicks", "광고 클릭", "", "회"),
+    ("cost", "광고비", "₩", ""),
+    ("conversions", "광고 플랫폼 전환수", "", "건"),
+)
 _KOREAN_DATE = re.compile(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일\s*(?:\([^)]*\))?")
 
 
@@ -100,6 +110,42 @@ def normalize(
             timestamp = utc_iso(cutoff)
         except (ValueError, OverflowError):
             raise InputError("원본 집계 시각은 보고 종료일 이후의 확인된 시각을 UTC 오프셋과 함께 입력해 주세요.") from None
+
+    current, _, campaign_level = _read_period(tables, first, last, ga_timezone)
+    data = {
+        **current,
+        "mode": mode, "start": first.isoformat(), "end": last.isoformat(), "timezone": ga_timezone,
+        "ads_source": " ".join(ads_source.split())[:80] or "광고 성과 보고서",
+        "complete": complete, "collected_through": timestamp, "imported_at": utc_iso(),
+    }
+    if last - first == WEEK - dt.timedelta(days=1) and first >= dt.date.min + WEEK:
+        previous_start, previous_end = first - WEEK, last - WEEK
+        comparison = {"start": previous_start.isoformat(), "end": previous_end.isoformat()}
+        issue = hold_reason(data)
+        if issue:
+            comparison["reason"] = issue
+        else:
+            required = {kind: tables[kind] for kind in ("sessions", "events", "ads")}
+            try:
+                previous, missing_events, previous_campaign_level = _read_period(
+                    required, previous_start, previous_end, ga_timezone,
+                )
+                if campaign_level != previous_campaign_level:
+                    raise InputError("광고 성과 자료의 계정 합계와 캠페인별 집계 단위를 맞춰 주세요.")
+            except InputError as exc:
+                comparison["reason"] = str(exc)
+            else:
+                comparison["previous"] = {
+                    key: None if key in missing_events else previous[key]
+                    for key, _, _, _ in COMPARISON_METRICS
+                }
+        data["comparison"] = comparison
+    return data
+
+
+def _read_period(
+    tables: dict[str, str], first: dt.date, last: dt.date, timezone: str,
+) -> tuple[dict, dict[str, int], bool]:
     days = {first + dt.timedelta(days=i) for i in range((last - first).days + 1)}
     facts: dict[str, dict] = {}
     for kind, content in tables.items():
@@ -107,7 +153,7 @@ def normalize(
         parsed: dict = {}
         source_days: set[dt.date] = set()
         timezone_header = re.search(r"^#\s*(?:시간대|Time\s*zone)\s*:\s*(\S+)\s*$", content, re.M | re.I)
-        if timezone_header and timezone_header[1] != ga_timezone:
+        if timezone_header and timezone_header[1] != timezone:
             raise InputError(f"{label} 자료의 시간대가 입력한 시간대와 다릅니다.")
         period_header = re.search(r"^#[ \t]*(\d{8})[ \t]*-[ \t]*(\d{8})[ \t]*\r?$", content, re.M)
         if period_header:
@@ -166,12 +212,11 @@ def normalize(
     event_counts = {
         name: [events[day, name] for day in days if (day, name) in events] for name in EVENT_NAMES
     }
-    warnings = [
-        f"{name} 행 없음 {len(days) - len(counts)}일" for name, counts in event_counts.items()
-        if len(counts) < len(days)
-    ]
+    missing_events = {name: len(days) - len(counts) for name, counts in event_counts.items() if len(counts) < len(days)}
+    warnings = [f"{name} 행 없음 {count}일" for name, count in missing_events.items()]
     ads = facts["ads"]
-    if len({bool(campaign) for _, campaign in ads}) > 1:
+    campaign_levels = {bool(campaign) for _, campaign in ads}
+    if len(campaign_levels) > 1:
         raise InputError("광고 성과 자료에 계정 합계와 캠페인별 행이 섞여 있습니다. 한 가지 단위로 제출해 주세요.")
     summary = [sum(row[i] for row in ads.values()) for i in range(4)]
     keywords: dict[str, int] = {}
@@ -179,9 +224,6 @@ def normalize(
         keywords[term] = keywords.get(term, 0) + impressions
 
     return {
-        "mode": mode, "start": first.isoformat(), "end": last.isoformat(), "timezone": ga_timezone,
-        "ads_source": " ".join(ads_source.split())[:80] or "광고 성과 보고서",
-        "complete": complete, "collected_through": timestamp, "imported_at": utc_iso(),
         "sessions": sum(facts["sessions"].values()),
         "form_submit": sum(event_counts["form_submit"]) if event_counts["form_submit"] else None,
         "home_kakao_click": sum(event_counts["home_kakao_click"]) if event_counts["home_kakao_click"] else None,
@@ -189,7 +231,30 @@ def normalize(
         "cost": str(summary[3]), "warnings": warnings,
         "keywords": [{"term": term, "impressions": count} for term, count in
                      sorted(keywords.items(), key=lambda entry: (-entry[1], entry[0]))[:30]],
-    }
+    }, missing_events, True in campaign_levels
+
+
+def comparison_text(data: dict) -> str:
+    comparison = data.get("comparison")
+    if comparison is None:
+        return ""
+    header = f"직전 7일 비교 · {comparison['start']} ~ {comparison['end']} → {data['start']} ~ {data['end']}"
+    if "reason" in comparison:
+        return f"{header}\n비교 보류 · {comparison['reason']}"
+    lines = [header]
+    for key, label, prefix, suffix in COMPARISON_METRICS:
+        previous = comparison["previous"][key]
+        if previous is None:
+            lines.append(f"{label} · 비교 보류 (직전 기간 일별 행 누락)")
+            continue
+        before, current = Decimal(previous), Decimal(data[key])
+        change = current - before
+        sign = "+" if change > 0 else "-" if change < 0 else ""
+        lines.append(
+            f"{label} · {prefix}{before:,}{suffix} → {prefix}{current:,}{suffix}"
+            f" ({sign}{prefix}{abs(change):,}{suffix})"
+        )
+    return "\n".join(lines)
 
 
 def hold_reason(data: dict) -> str | None:
