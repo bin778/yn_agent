@@ -255,8 +255,9 @@ class TeamBriefs:
                 output={
                     "status_summary": "Warning" if issue else "Normal",
                     "reason": issue or "제출된 과거 보고서의 기간, 시간대, 일별 지표를 확인했습니다.",
-                    "tracking_anomalies": data["warnings"],
-                    "action_items": ["원본 보고서의 집계 상태와 누락 행을 확인해 주세요."] if issue else [],
+                    "tracking_anomalies": [] if data.get("ga4_pending") else data["warnings"],
+                    "action_items": ["원본 보고서의 집계 상태와 누락 행을 확인해 주세요."]
+                    if issue and not data.get("ga4_pending") else [],
                 },
                 model_version="policy-engine/no-llm", input_summary="verified_input:tracking",
             )

@@ -55,9 +55,12 @@ def _input_summary(data: dict) -> str:
            "GA4 원본 집계 완료 시각 · 미확인"] if ga4 else []),
         *([f"GA4 이벤트 원본 CSV · 0건 확인 행 {data['ga4_verified_zeros']}개 보완"]
           if ga4 and data.get("ga4_verified_zeros") else []),
+        *([f"GA4 미기록일은 0건으로 집계 · 날짜·이벤트 조합 {data['ga4_inferred_zeros']}개"]
+          if ga4 and data.get("ga4_inferred_zeros") else []),
         f"제출 처리 시각 · {seoul_time_label(data['imported_at'])}",
         brief_inputs.summary_text(data),
-        *(["누락 · " + " / ".join(data["warnings"])] if data["warnings"] else []),
+        *([("추적 확인 · " if ga4 else "누락 · ") + " / ".join(data["warnings"])]
+          if data["warnings"] and not data.get("ga4_pending") else []),
         *([comparison] if comparison else []),
     ))
 

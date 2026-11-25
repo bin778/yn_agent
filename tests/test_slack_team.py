@@ -194,6 +194,18 @@ class SlackTeamTest(unittest.TestCase):
         self.drain()
         self.assertIn("검색 캠페인 · 광고비 +₩700", self.performance_reply()["text"])
 
+    def test_ga4_slack_preview_can_infer_zeros_without_a_reference_csv(self):
+        self.briefs.ga4_fetch = Mock(return_value=Report(
+            {"20261025": 100}, {}, "2026-10-30T00:00:00+00:00", False,
+            recent_events=frozenset(("20261024", event) for event in brief_inputs.EVENT_NAMES),
+        ))
+        preview = self.submit_real("ga4", complete=True, tables={
+            "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",
+        })
+        self.assertIn("폼 제출 0건 · 카카오톡 클릭 0회", preview["text"])
+        self.assertIn("GA4 미기록일은 0건으로 집계 · 날짜·이벤트 조합 2개", preview["text"])
+        self.assertNotIn("광고 분석 보류", preview["text"])
+
     def test_ga4_permission_error_never_produces_confirmation(self):
         self.briefs.ga4_fetch = Mock(side_effect=brief_inputs.InputError("GA4 조회 권한 없음"))
         preview = self.submit_real("ga4", tables={"ads": "required CSV"})
@@ -203,13 +215,16 @@ class SlackTeamTest(unittest.TestCase):
     def test_ga4_pending_holds_and_can_be_disabled_before_confirmation(self):
         day = "20261025"
         self.briefs.ga4_fetch = Mock(return_value=Report(
-            {day: 100}, {(day, event): 0 for event in brief_inputs.EVENT_NAMES},
+            {day: 100}, {},
             "2026-10-26T00:00:00+00:00", True,
         ))
         preview = self.submit_real("ga4", complete=True, tables={
             "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",
         })
         self.assertIn("광고 분석 보류 · GA4 집계 대기", preview["text"])
+        self.assertIn("2026-10-28 00:00 (한국 시간)부터 다시 조회", preview["text"])
+        self.assertIn("폼 제출 집계 중 · 카카오톡 클릭 집계 중", preview["text"])
+        self.assertNotIn("행 없음", preview["text"])
         fetch = self.briefs.ga4_fetch
         self.briefs.ga4_fetch = None
         self.assertIn("비활성화", self.confirm_real(preview))
@@ -220,7 +235,7 @@ class SlackTeamTest(unittest.TestCase):
         self.assertIn("GA4 집계 대기", self.performance_reply()["text"])
 
     def test_ga4_mode_holds_for_missing_event(self):
-        self.assert_ga4_hold({"form_submit": 0}, complete=True, reason="GA4 필수 이벤트의 일별 행")
+        self.assert_ga4_hold({"form_submit": 0}, complete=True, reason="GA4 추적 확인 필요")
 
     def test_ga4_mode_holds_for_unconfirmed_ads(self):
         self.assert_ga4_hold(dict.fromkeys(brief_inputs.EVENT_NAMES, 0), complete=False, reason="집계 완료가 미확인")

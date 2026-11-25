@@ -61,7 +61,7 @@ def make_view(mode, channel):
         if ga4 and key == "events":
             blocks.append(_input(
                 key, "GA4 이벤트 원본 CSV", {"type": "file_input", "filetypes": ["csv"], "max_files": 1},
-                optional=True, hint="API에서 빠진 행은 같은 기간의 원본 CSV에 0건이 있을 때만 보완합니다.",
+                optional=True, hint="추적 확인이 필요한 경우, 같은 기간 원본 CSV의 명시적 0건을 사용할 수 있습니다.",
             ))
             continue
         if mode in {"csv", "ga4"}:
@@ -157,6 +157,7 @@ def read_view(client, view, user, mode, *, ga4_fetch=None):
         events_reference = tables.pop("events", "")
         if events_reference:
             report = report.with_verified_zeros(events_reference)
+        report = report.with_inferred_zeros()
         tables.update(report.tables())
     return normalize(
         tables, start=start, end=end,

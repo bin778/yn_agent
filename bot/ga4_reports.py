@@ -11,10 +11,13 @@ from dataclasses import dataclass, replace
 from decimal import InvalidOperation
 from zoneinfo import ZoneInfo
 
-from .brief_inputs import EVENT_NAMES, InputError, _amount, _check_csv_scope, _rows, parse_date, report_period
+from .brief_inputs import (
+    EVENT_NAMES, InputError, _amount, _check_csv_scope, _rows, ga4_ready_at, ga4_wait_message, parse_date, report_period,
+)
 from .db import utc_iso, utc_now
 
 TIMEZONE = "Asia/Seoul"
+_EVENT_LOOKBACK_DAYS = 7
 _SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
 _RETRYABLE = {429, 500, 502, 503, 504}
 _PERMISSION_ERROR = "GA4 조회 권한 없음. GA4 속성의 뷰어 권한과 EC2 인증을 확인해 주세요."
@@ -28,6 +31,25 @@ class Report:
     fetched_at: str
     pending: bool
     verified_zeros: int = 0
+    inferred_zeros: int = 0
+    recent_events: frozenset[tuple[str, str]] = frozenset()
+
+    def with_inferred_zeros(self) -> Report:
+        if self.pending:
+            return self
+        recorded = self.recent_events | {key for key, count in self.events.items() if count > 0}
+        eligible = {
+            (parse_date(day).toordinal() + offset, event)
+            for day, event in recorded
+            for offset in range(1, _EVENT_LOOKBACK_DAYS + 1)
+        }
+        zeros = {
+            (day, event): 0
+            for day in self.sessions
+            for event in EVENT_NAMES
+            if (day, event) not in self.events and (parse_date(day).toordinal(), event) in eligible
+        }
+        return replace(self, events=self.events | zeros, inferred_zeros=self.inferred_zeros + len(zeros))
 
     def with_verified_zeros(self, content: str) -> Report:
         if self.pending:
@@ -141,11 +163,15 @@ def read_report(start: str, end: str, run) -> Report:
     first, last = report_period(start, end)
     if (last - first).days == 6 and first >= dt.date.min + dt.timedelta(days=7):
         first -= dt.timedelta(days=7)
+    now = utc_now()
+    pending = now < ga4_ready_at(last, TIMEZONE)
+    recent_first = first if pending else dt.date.fromordinal(max(1, first.toordinal() - _EVENT_LOOKBACK_DAYS))
     dates = [{"startDate": first.isoformat(), "endDate": last.isoformat()}]
+    event_dates = [{"startDate": recent_first.isoformat(), "endDate": last.isoformat()}]
     day = {"name": "date"}
     payload = {"requests": [
         {"dateRanges": dates, "dimensions": [day], "metrics": [{"name": "sessions"}], "keepEmptyRows": True},
-        {"dateRanges": dates, "dimensions": [day, {"name": "eventName"}], "metrics": [{"name": "eventCount"}],
+        {"dateRanges": event_dates, "dimensions": [day, {"name": "eventName"}], "metrics": [{"name": "eventCount"}],
          "keepEmptyRows": True, "dimensionFilter": {"filter": {
              "fieldName": "eventName", "inListFilter": {"values": list(EVENT_NAMES), "caseSensitive": True},
          }}},
@@ -154,20 +180,23 @@ def read_report(start: str, end: str, run) -> Report:
     try:
         sessions_report, events_report = response["reports"]
         sessions = _report_rows(sessions_report, ("date",), "sessions", first, last)
-        events = _report_rows(events_report, ("date", "eventName"), "eventCount", first, last)
+        events = _report_rows(events_report, ("date", "eventName"), "eventCount", recent_first, last)
     except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
         if isinstance(exc, InputError):
             raise
         raise InputError("GA4 응답의 날짜 또는 지표 형식을 확인할 수 없습니다.") from None
     expected = {(first + dt.timedelta(days=i)).strftime("%Y%m%d") for i in range((last - first).days + 1)}
     missing = sorted(expected - {key[0] for key in sessions})
-    now = utc_now()
-    end_of_day = dt.datetime.combine(last + dt.timedelta(days=1), dt.time.min, ZoneInfo(TIMEZONE))
-    pending = now < end_of_day + dt.timedelta(hours=48)
     if missing:
-        prefix = "GA4 집계 대기 · " if pending else ""
-        raise InputError(prefix + "GA4 세션 날짜 누락 · " + ", ".join(missing[:5]))
-    return Report({key[0]: value for key, value in sessions.items()}, events, utc_iso(now), pending)
+        if pending:
+            raise InputError(ga4_wait_message(last, TIMEZONE))
+        raise InputError("GA4 세션 날짜 누락 · " + ", ".join(missing[:5]))
+    recent = frozenset(key for key, count in events.items() if key[0] not in expected and count > 0)
+    report_events = {key: count for key, count in events.items() if key[0] in expected}
+    return Report(
+        {key[0]: value for key, value in sessions.items()}, report_events, utc_iso(utc_now()), pending,
+        recent_events=recent,
+    )
 
 
 def _report_rows(report, dimensions, metric, first, last):

@@ -190,5 +190,5 @@ Slack에서 `/hermes-test status`를 실행한 뒤 `keyword`, `content`, `perfor
      --sessions /path/to/sessions.csv --events /path/to/events.csv
    ```
 
-3. 대조 성공 뒤 `HERMES_GA4_ENABLED=true`로 설정하고 Slack 서비스를 재시작합니다. `/hermes-team brief ga4`에 Google Ads CSV를 첨부하면 비공개 미리보기를 받습니다. 보고 종료일이 끝난 뒤 48시간 이내이거나 GA4 필수 이벤트 일별 행이 빠지면 광고 제안을 보류합니다. 같은 기간의 GA4 이벤트 원본 CSV를 선택 첨부하면 API에서 빠진 행 중 CSV에 숫자 0이 있는 행만 보완합니다. API와 CSV의 이벤트 수가 다르면 검증을 중단합니다. 원본에서도 확인되지 않은 행은 누락으로 남습니다.
+3. 대조 성공 뒤 `HERMES_GA4_ENABLED=true`로 설정하고 Slack 서비스를 재시작합니다. `/hermes-team brief ga4`에 Google Ads CSV를 첨부하면 비공개 미리보기를 받습니다. 보고 종료일이 끝난 뒤 48시간 동안에는 집계 중과 다시 조회할 수 있는 시각을 표시합니다. 이 기간이 지나면 세션 날짜가 모두 있고 API 응답에 데이터 제한이 없는 경우, 미기록일 직전 7일 안에 같은 이벤트의 양수 기록이 있는 행을 0건으로 처리합니다. 추적 기록이 없으면 확인이 필요한 것으로 표시하고 현재 보고 기간에 해당하는 경우 광고 제안을 보류합니다. 같은 기간의 GA4 이벤트 원본 CSV를 선택 첨부하면 명시된 0건을 적용하며 API와 이벤트 수가 다르면 검증을 중단합니다.
 4. 롤백할 때는 `HERMES_GA4_ENABLED=false`로 전환하고 서비스를 재시작합니다.

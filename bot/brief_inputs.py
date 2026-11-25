@@ -19,6 +19,7 @@ FIELDS = {
     "keywords": ("검색어", ("날짜", "검색어", "노출수")),
 }
 EVENT_NAMES = ("form_submit", "home_kakao_click")
+_EVENT_LABELS = {"form_submit": "폼 제출", "home_kakao_click": "카카오톡 클릭"}
 WEEK = dt.timedelta(days=7)
 COMPARISON_METRICS = (
     ("sessions", "GA4 세션", "", "회"),
@@ -91,6 +92,15 @@ def report_period(start: str, end: str) -> tuple[dt.date, dt.date]:
     return first, last
 
 
+def ga4_ready_at(end: dt.date, timezone: str) -> dt.datetime:
+    return dt.datetime.combine(end, dt.time.min, ZoneInfo(timezone)) + dt.timedelta(days=3)
+
+
+def ga4_wait_message(end: dt.date, timezone: str) -> str:
+    ready = ga4_ready_at(end, timezone)
+    return f"GA4 집계 대기 · {ready:%Y-%m-%d %H:%M} (한국 시간)부터 다시 조회해 주세요."
+
+
 def normalize(
     tables: dict[str, str], *, start: str, end: str, ga_timezone: str, ads_timezone: str,
     complete: bool, collected_through: str = "", mode: str, ads_source: str = "", ga4_report=None,
@@ -117,7 +127,9 @@ def normalize(
         except (ValueError, OverflowError):
             raise InputError("원본 집계 시각은 보고 종료일 이후의 확인된 시각을 UTC 오프셋과 함께 입력해 주세요.") from None
 
-    current, _, current_ads = _read_period(tables, first, last, ga_timezone, from_ga4=ga4_report is not None)
+    current, missing_current_events, current_ads = _read_period(
+        tables, first, last, ga_timezone, from_ga4=ga4_report is not None,
+    )
     data = {
         **current,
         "mode": mode, "start": first.isoformat(), "end": last.isoformat(), "timezone": ga_timezone,
@@ -127,7 +139,12 @@ def normalize(
     if ga4_report is not None:
         data.update(
             ga4_fetched_at=ga4_report.fetched_at, ga4_pending=ga4_report.pending,
-            ga4_verified_zeros=ga4_report.verified_zeros,
+            ga4_verified_zeros=ga4_report.verified_zeros, ga4_inferred_zeros=ga4_report.inferred_zeros,
+            ga4_incomplete_events=list(missing_current_events),
+        )
+        data["warnings"] = (
+            [] if ga4_report.pending else
+            [f"{_EVENT_LABELS[name]} {count}일" for name, count in missing_current_events.items()]
         )
     if last - first == WEEK - dt.timedelta(days=1) and first >= dt.date.min + WEEK:
         previous_start, previous_end = first - WEEK, last - WEEK
@@ -299,7 +316,8 @@ def comparison_text(data: dict) -> str:
     for key, label, prefix, suffix in COMPARISON_METRICS:
         previous = comparison["previous"][key]
         if previous is None:
-            lines.append(f"{label} · 비교 보류 (직전 기간 일별 행 누락)")
+            reason = "직전 기간 추적 확인 필요" if data.get("mode") == "ga4" else "직전 기간 일별 행 누락"
+            lines.append(f"{label} · 비교 보류 ({reason})")
             continue
         before, current = Decimal(previous), Decimal(data[key])
         change = current - before
@@ -313,22 +331,29 @@ def comparison_text(data: dict) -> str:
 
 def hold_reason(data: dict) -> str | None:
     if data.get("ga4_pending"):
-        return "GA4 집계 대기 · 보고 종료일이 끝난 뒤 48시간 이내입니다."
+        return ga4_wait_message(parse_date(data["end"]), data["timezone"])
     if not data["complete"]:
         return "집계 완료가 미확인입니다."
     if data["warnings"]:
         if data["mode"] == "ga4":
-            return "GA4 필수 이벤트의 일별 행이 빠져 있습니다. 원본 GA4 이벤트 CSV에서 0건을 확인할 수 있으면 첨부해 주세요."
+            return ("GA4 추적 확인 필요 · 이벤트 수집 상태를 확인해 주세요. "
+                    "원본 GA4 이벤트 CSV에서 0건을 확인할 수 있으면 첨부해 주세요.")
         return "GA4 필수 이벤트의 일별 행이 빠져 있습니다. 유효한 0건은 숫자 0으로 입력해 주세요."
     return None
 
 
 def summary_text(data: dict) -> str:
-    def observed(value):
-        return f"{value:,}회" if value is not None else "기록 행 없음"
+    def observed(event):
+        value = data[event]
+        if data.get("ga4_pending"):
+            return "집계 중"
+        if data.get("mode") == "ga4" and (event in data.get("ga4_incomplete_events", ()) or value is None):
+            return "추적 확인 필요"
+        unit = "건" if event == "form_submit" and data.get("mode") == "ga4" else "회"
+        return f"{value:,}{unit}" if value is not None else "기록 행 없음"
 
     return (
-        f"세션 {data['sessions']:,}회 · 폼 제출 {observed(data['form_submit'])} · "
-        f"카카오톡 클릭 {observed(data['home_kakao_click'])}\n"
+        f"세션 {data['sessions']:,}회 · 폼 제출 {observed('form_submit')} · "
+        f"카카오톡 클릭 {observed('home_kakao_click')}\n"
         f"광고비 ₩{Decimal(data['cost']):,} · 광고 전환 {data['conversions']}건"
     )

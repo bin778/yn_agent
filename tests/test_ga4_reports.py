@@ -34,8 +34,10 @@ class GA4ReportsTest(unittest.TestCase):
         with patch.object(ga4_reports, "utc_now", return_value=now):
             report = ga4_reports.read_report("2026-11-14", "2026-11-20", client)
         params, = client.call_args.args
-        for request in params["requests"]:
-            self.assertEqual(request["dateRanges"], [{"startDate": "2026-11-07", "endDate": "2026-11-20"}])
+        sessions_request, events_request = params["requests"]
+        self.assertEqual(sessions_request["dateRanges"], [{"startDate": "2026-11-07", "endDate": "2026-11-20"}])
+        event_start = "2026-11-07" if report.pending else "2026-10-31"
+        self.assertEqual(events_request["dateRanges"], [{"startDate": event_start, "endDate": "2026-11-20"}])
         event_filter = params["requests"][1]["dimensionFilter"]["filter"]
         self.assertEqual(event_filter["inListFilter"]["values"], list(brief_inputs.EVENT_NAMES))
         return report
@@ -75,10 +77,27 @@ class GA4ReportsTest(unittest.TestCase):
             with self.subTest(row=row), self.assertRaisesRegex(brief_inputs.InputError, reason):
                 report.with_verified_zeros(prefix + header + row)
 
+    def test_infers_zeros_per_event_for_only_seven_days_after_a_recorded_occurrence(self):
+        report = self.read(response(events={
+            ("20261106", "form_submit"): 1,
+            ("20261114", "home_kakao_click"): 0,
+            ("20261118", "home_kakao_click"): 2,
+        }))
+        self.assertNotIn(("20261106", "form_submit"), report.events)
+        filled = report.with_inferred_zeros()
+        self.assertEqual(filled.inferred_zeros, 9)
+        self.assertEqual(filled.events[("20261113", "form_submit")], 0)
+        self.assertNotIn(("20261114", "form_submit"), filled.events)
+        self.assertNotIn(("20261115", "home_kakao_click"), filled.events)
+        self.assertEqual(filled.events[("20261118", "home_kakao_click")], 2)
+        self.assertEqual(filled.events[("20261120", "home_kakao_click")], 0)
+
     def test_within_48_hours_at_seoul_day_boundary(self):
         before = dt.datetime(2026, 11, 22, 14, 59, tzinfo=dt.timezone.utc)
         at = before + dt.timedelta(minutes=1)
-        self.assertTrue(self.read(response(), now=before).pending)
+        pending = self.read(response(events={("20261119", "form_submit"): 1}), now=before)
+        self.assertTrue(pending.pending)
+        self.assertNotIn(("20261120", "form_submit"), pending.with_inferred_zeros().events)
         self.assertFalse(self.read(response(), now=at).pending)
 
     def test_rejects_timezone_restrictions_and_missing_sessions(self):
