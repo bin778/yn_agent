@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from slack_sdk.errors import SlackClientError
 
-from ..brief_inputs import FIELDS, InputError, ga4_ready_at, hold_reason, normalize
+from ..brief_inputs import FIELDS, REQUIRED_EVENT_NAMES, InputError, ga4_ready_at, hold_reason, normalize
 from ..db import utc_now
 from ..google_ads_reports import weekly_period
 from ..ga4_reports import TIMEZONE
@@ -156,7 +156,7 @@ def _weekly(start, end, ga4_fetch, ads_fetch):
     issue = hold_reason(data) or comparison.get("reason")
     if issue:
         raise InputError(issue)
-    if any(comparison["previous"][key] is None for key in ("form_submit", "home_kakao_click")):
+    if any(comparison["previous"][key] is None for key in REQUIRED_EVENT_NAMES):
         raise InputError("GA4 직전 주 이벤트의 수집 상태를 확인해 주세요.")
     data["ads_fetched_at"] = ads_report.fetched_at
     return data

@@ -5,7 +5,7 @@ import datetime as dt
 import os
 from pathlib import Path
 
-from bot.brief_inputs import EVENT_NAMES, InputError, _amount, _rows, parse_date, report_period
+from bot.brief_inputs import EVENT_NAMES, REQUIRED_EVENT_NAMES, InputError, _amount, _rows, parse_date, report_period
 from bot.ga4_reports import fetch_report
 
 
@@ -75,7 +75,10 @@ def main():
     for event in EVENT_NAMES:
         print(f"API {event} {sum(v for (_, name), v in report.events.items() if name == event)}회")
     sessions_match = reconcile(report.sessions, sessions, kind="sessions")
-    events_match = reconcile(report.events, events, kind="events")
+    checked_events = set(REQUIRED_EVENT_NAMES) | {name for _, name in events}
+    events_match = reconcile(
+        {key: count for key, count in report.events.items() if key[1] in checked_events}, events, kind="events",
+    )
     result = sessions_match and events_match
     print("CSV 대조 통과" if result else "CSV 대조 실패")
     return 0 if result else 1

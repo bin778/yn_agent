@@ -171,11 +171,17 @@ class SlackTeamTest(unittest.TestCase):
         self.drain()
         self.assertIn("검토용 초안 확인", self.pm_card()["text"])
 
-    def prepare_weekly(self):
+    def prepare_weekly(self, *, with_phone=False):
         dates = [dt.date(2026, 11, day) for day in range(7, 21)]
+        events = {
+            (day.strftime("%Y%m%d"), event): 0 for day in dates for event in brief_inputs.REQUIRED_EVENT_NAMES
+        }
+        if with_phone:
+            events.update({(day.strftime("%Y%m%d"), brief_inputs.PHONE_EVENT): 0 for day in dates})
+            events["20261113", brief_inputs.PHONE_EVENT] = 1
+            events["20261120", brief_inputs.PHONE_EVENT] = 11
         self.briefs.ga4_fetch = Mock(return_value=Report(
-            {day.strftime("%Y%m%d"): 100 for day in dates},
-            {(day.strftime("%Y%m%d"), event): 0 for day in dates for event in brief_inputs.EVENT_NAMES},
+            {day.strftime("%Y%m%d"): 100 for day in dates}, events,
             "2026-11-26T00:00:00+00:00", False,
         ))
         self.briefs.ads_fetch = Mock(return_value=AdsReport(
@@ -193,12 +199,14 @@ class SlackTeamTest(unittest.TestCase):
                 self.assertEqual([block["element"]["initial_date"] for block in blocks], expected)
 
     def test_weekly_same_flow_confirms_only_once_and_respects_rollback(self):
-        self.prepare_weekly()
+        self.prepare_weekly(with_phone=True)
         preview = self.submit_real("weekly", start="2026-11-14", end="2026-11-20")
         self.briefs.ga4_fetch.assert_called_once_with("2026-11-14", "2026-11-20")
         self.briefs.ads_fetch.assert_called_once_with("2026-11-14", "2026-11-20")
         self.assertIn("GA4 Data API · Google Ads API", preview["text"])
         self.assertIn("Google Ads API 조회 시각", preview["text"])
+        self.assertIn("홈페이지 전화 클릭 11회", preview["text"])
+        self.assertIn("GA4 홈페이지 전화 클릭 · 1회 → 11회 (+10회)", preview["text"])
         self.assertIn("광고 성과 비교 · 게시 가능", preview["text"])
         self.assertEqual(preview["blocks"][-1]["elements"][0]["text"]["text"], "확인하고 게시")
         ads_fetch = self.briefs.ads_fetch
@@ -208,6 +216,14 @@ class SlackTeamTest(unittest.TestCase):
         self.assertEqual(self.confirm_real(preview), self.confirm_real(preview))
         self.drain()
         self.assertIn("검색 캠페인 · 광고비 +₩700", self.performance_reply()["text"])
+        self.assertIn("GA4 홈페이지 전화 클릭 · 1회 → 11회 (+10회)", self.performance_reply()["text"])
+
+    def test_weekly_missing_optional_phone_allows_posting(self):
+        self.prepare_weekly()
+        preview = self.submit_real("weekly", start="2026-11-14", end="2026-11-20")
+        self.assertIn("홈페이지 전화 클릭 추적 확인 필요", preview["text"])
+        self.assertIn("GA4 홈페이지 전화 클릭 · 비교 보류", preview["text"])
+        self.assertIn("광고 성과 비교 · 게시 가능", preview["text"])
 
     def test_weekly_pending_skips_reads_and_permission_failure_blocks_posting(self):
         self.prepare_weekly()
@@ -252,7 +268,7 @@ class SlackTeamTest(unittest.TestCase):
     def test_ga4_slack_preview_can_infer_zeros_without_a_reference_csv(self):
         self.briefs.ga4_fetch = Mock(return_value=Report(
             {"20261025": 100}, {}, "2026-10-30T00:00:00+00:00", False,
-            recent_events=frozenset(("20261024", event) for event in brief_inputs.EVENT_NAMES),
+            recent_events=frozenset(("20261024", event) for event in brief_inputs.REQUIRED_EVENT_NAMES),
         ))
         preview = self.submit_real("ga4", complete=True, tables={
             "ads": "날짜,전환수,노출수,클릭수,비용\n2026-10-25,2,100,10,2070",

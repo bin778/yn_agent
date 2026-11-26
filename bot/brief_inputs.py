@@ -18,13 +18,16 @@ FIELDS = {
     "ads": ("광고 성과", ("날짜", "전환수", "노출수", "클릭수", "비용")),
     "keywords": ("검색어", ("날짜", "검색어", "노출수")),
 }
-EVENT_NAMES = ("form_submit", "home_kakao_click")
-_EVENT_LABELS = {"form_submit": "폼 제출", "home_kakao_click": "카카오톡 클릭"}
+REQUIRED_EVENT_NAMES = ("form_submit", "home_kakao_click")
+PHONE_EVENT = "home_phone_click"
+EVENT_NAMES = (*REQUIRED_EVENT_NAMES, PHONE_EVENT)
+_EVENT_LABELS = {"form_submit": "폼 제출", "home_kakao_click": "카카오톡 클릭", PHONE_EVENT: "홈페이지 전화 클릭"}
 WEEK = dt.timedelta(days=7)
 COMPARISON_METRICS = (
     ("sessions", "GA4 세션", "", "회"),
     ("form_submit", "GA4 폼 제출", "", "건"),
     ("home_kakao_click", "GA4 카카오톡 클릭", "", "회"),
+    (PHONE_EVENT, "GA4 홈페이지 전화 클릭", "", "회"),
     ("impressions", "광고 노출", "", "회"),
     ("clicks", "광고 클릭", "", "회"),
     ("cost", "광고비", "₩", ""),
@@ -130,21 +133,24 @@ def normalize(
     current, missing_current_events, current_ads = _read_period(
         tables, first, last, ga_timezone, from_ga4=ga4_report is not None,
     )
+    if mode != "weekly" and current[PHONE_EVENT] is None:
+        del current[PHONE_EVENT]
     data = {
         **current,
         "mode": mode, "start": first.isoformat(), "end": last.isoformat(), "timezone": ga_timezone,
         "ads_source": " ".join(ads_source.split())[:80] or "광고 성과 보고서",
         "complete": complete, "collected_through": timestamp, "imported_at": utc_iso(),
+        "ga4_incomplete_events": list(missing_current_events),
     }
     if ga4_report is not None:
         data.update(
             ga4_fetched_at=ga4_report.fetched_at, ga4_pending=ga4_report.pending,
             ga4_verified_zeros=ga4_report.verified_zeros, ga4_inferred_zeros=ga4_report.inferred_zeros,
-            ga4_incomplete_events=list(missing_current_events),
         )
         data["warnings"] = (
             [] if ga4_report.pending else
-            [f"{_EVENT_LABELS[name]} {count}일" for name, count in missing_current_events.items()]
+            [f"{_EVENT_LABELS[name]} {count}일" for name, count in missing_current_events.items()
+             if name in REQUIRED_EVENT_NAMES]
         )
     if last - first == WEEK - dt.timedelta(days=1) and first >= dt.date.min + WEEK:
         previous_start, previous_end = first - WEEK, last - WEEK
@@ -165,7 +171,7 @@ def normalize(
             else:
                 comparison["previous"] = {
                     key: None if key in missing_events else previous[key]
-                    for key, _, _, _ in COMPARISON_METRICS
+                    for key, _, _, _ in COMPARISON_METRICS if key in data
                 }
                 comparison["ad_changes"] = _advertising_changes(previous_ads, current_ads)
         data["comparison"] = comparison
@@ -246,7 +252,8 @@ def _read_period(
         name: [events[day, name] for day in days if (day, name) in events] for name in EVENT_NAMES
     }
     missing_events = {name: len(days) - len(counts) for name, counts in event_counts.items() if len(counts) < len(days)}
-    warnings = [f"{name} 행 없음 {count}일" for name, count in missing_events.items()]
+    warnings = [f"{name} 행 없음 {count}일" for name, count in missing_events.items()
+                if name in REQUIRED_EVENT_NAMES]
     ads = facts["ads"]
     campaign_levels = {bool(campaign) for _, campaign in ads}
     if len(campaign_levels) > 1:
@@ -258,8 +265,7 @@ def _read_period(
 
     return {
         "sessions": sum(facts["sessions"].values()),
-        "form_submit": sum(event_counts["form_submit"]) if event_counts["form_submit"] else None,
-        "home_kakao_click": sum(event_counts["home_kakao_click"]) if event_counts["home_kakao_click"] else None,
+        **{name: sum(counts) if counts else None for name, counts in event_counts.items()},
         "conversions": str(summary[0]), "impressions": int(summary[1]), "clicks": int(summary[2]),
         "cost": str(summary[3]), "warnings": warnings,
         "keywords": [{"term": term, "impressions": count} for term, count in
@@ -314,7 +320,12 @@ def comparison_text(data: dict) -> str:
         return f"{header}\n비교 보류 · {comparison['reason']}"
     lines = [header]
     for key, label, prefix, suffix in COMPARISON_METRICS:
-        previous = comparison["previous"][key]
+        if key not in data:
+            continue
+        previous = comparison["previous"].get(key)
+        if key == PHONE_EVENT and (data[key] is None or key in data.get("ga4_incomplete_events", ())):
+            lines.append(f"{label} · 비교 보류 (현재 기간 추적 확인 필요)")
+            continue
         if previous is None:
             reason = "직전 기간 추적 확인 필요" if data.get("mode") in {"ga4", "weekly"} else "직전 기간 일별 행 누락"
             lines.append(f"{label} · 비교 보류 ({reason})")
@@ -347,13 +358,16 @@ def summary_text(data: dict) -> str:
         value = data[event]
         if data.get("ga4_pending"):
             return "집계 중"
+        if event == PHONE_EVENT and (value is None or event in data.get("ga4_incomplete_events", ())):
+            return "추적 확인 필요" if value is None else f"{value:,}회 (일부 날짜 추적 확인 필요)"
         if data.get("mode") in {"ga4", "weekly"} and (event in data.get("ga4_incomplete_events", ()) or value is None):
             return "추적 확인 필요"
         unit = "건" if event == "form_submit" and data.get("mode") in {"ga4", "weekly"} else "회"
         return f"{value:,}{unit}" if value is not None else "기록 행 없음"
 
+    phone = f" · 홈페이지 전화 클릭 {observed(PHONE_EVENT)}" if PHONE_EVENT in data else ""
     return (
         f"세션 {data['sessions']:,}회 · 폼 제출 {observed('form_submit')} · "
-        f"카카오톡 클릭 {observed('home_kakao_click')}\n"
+        f"카카오톡 클릭 {observed('home_kakao_click')}{phone}\n"
         f"광고비 ₩{Decimal(data['cost']):,} · 광고 전환 {data['conversions']}건"
     )
