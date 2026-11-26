@@ -72,7 +72,9 @@ class TeamBriefs:
                 raise workflow.NotFoundError("input not found")
             return json.loads(row["payload_json"])
 
-    def confirm_input(self, input_id: str, user_id: str, *, allow_ga4: bool = True) -> str:
+    def confirm_input(
+        self, input_id: str, user_id: str, *, allow_ga4: bool = True, allow_weekly: bool = False,
+    ) -> str:
         with closing(get_conn(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -84,8 +86,11 @@ class TeamBriefs:
                 raise workflow.NotFoundError("input not found or expired")
             if row["brief_id"]:
                 return row["brief_id"]
-            if not allow_ga4 and json.loads(row["payload_json"]).get("mode") == "ga4":
+            mode = json.loads(row["payload_json"]).get("mode")
+            if mode == "ga4" and not allow_ga4:
                 raise brief_inputs.InputError("GA4 API 입력이 비활성화되어 있습니다.")
+            if mode == "weekly" and not allow_weekly:
+                raise brief_inputs.InputError("주간 API 브리핑 연결을 사용할 수 없습니다.")
             brief_id = str(uuid.uuid4())
             self._enqueue(conn, brief_id, user_id, "imported")
             conn.execute("UPDATE team_brief_inputs SET brief_id=? WHERE input_id=?", (brief_id, input_id))

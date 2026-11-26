@@ -513,9 +513,18 @@ def main() -> int:
 
             property_id = os.environ.get("HERMES_GA4_PROPERTY_ID", "").strip()
             ga4_fetch = partial(fetch_report, property_id)
+        ads_fetch = None
+        if os.environ.get("HERMES_GOOGLE_ADS_ENABLED", "").strip().lower() == "true":
+            from functools import partial
+
+            from ..google_ads_reports import fetch_report as fetch_ads_report
+
+            customer_id = os.environ.get("HERMES_GOOGLE_ADS_CUSTOMER_ID", "").strip().replace("-", "")
+            credentials_path = os.environ.get("HERMES_GOOGLE_ADS_CREDENTIALS", "").strip()
+            ads_fetch = partial(fetch_ads_report, customer_id, credentials_path)
         team_briefs = SlackTeamBriefs(
             deps.mapping, DB_PATH, draft_channel, approval_mode=drafts.approval_mode,
-            keyword_approval_mode=keyword_mode, ga4_fetch=ga4_fetch,
+            keyword_approval_mode=keyword_mode, ga4_fetch=ga4_fetch, ads_fetch=ads_fetch,
         )
     app = create_app(settings, deps, approval_demo, drafts=drafts, team_briefs=team_briefs)
     handler = SocketModeHandler(app, settings.app_token)

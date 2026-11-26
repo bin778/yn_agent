@@ -3,18 +3,20 @@ import io
 import tempfile
 import unittest
 from contextlib import closing
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from bot import brief_inputs, workflow
 from bot.ga4_reports import Report
+from bot.google_ads_reports import Report as AdsReport
 from bot.agents.content_editor import SlackContentEditorOutput
 from bot.db import get_conn, get_tracking_status, upsert_tracking_status, utc_now
 from bot.fake_data import get_fake_tracking_data
 from bot.llm_client import CodexTimeoutError
 from bot.schemas import DataAssistantOutput, KeywordAnalystOutput, PerformanceAnalystOutput
 from bot.slack_adapter.app import build_dependencies, register_handlers
-from bot.slack_adapter.brief_input import CONFIRM, MODAL
+from bot.slack_adapter.brief_input import CONFIRM, MODAL, make_view
 from bot.slack_adapter.config import SlackMapping, SlackSettings
 from bot.slack_adapter.team import COMMAND, DRAFT_RETRY_ACTION, PERFORMANCE_RETRY_ACTION, SlackTeamBriefs
 
@@ -168,6 +170,59 @@ class SlackTeamTest(unittest.TestCase):
         self.keyword_action("ULEGAL")
         self.drain()
         self.assertIn("검토용 초안 확인", self.pm_card()["text"])
+
+    def prepare_weekly(self):
+        dates = [dt.date(2026, 11, day) for day in range(7, 21)]
+        self.briefs.ga4_fetch = Mock(return_value=Report(
+            {day.strftime("%Y%m%d"): 100 for day in dates},
+            {(day.strftime("%Y%m%d"), event): 0 for day in dates for event in brief_inputs.EVENT_NAMES},
+            "2026-11-26T00:00:00+00:00", False,
+        ))
+        self.briefs.ads_fetch = Mock(return_value=AdsReport(
+            {"1": "검색 캠페인"},
+            {(day, "1"): (10, 2, (100 if day.day < 14 else 200) * 1_000_000, Decimal("1.25")) for day in dates},
+            "2026-11-26T00:00:00+00:00",
+        ))
+
+    def test_weekly_modal_defaults_to_latest_ready_seoul_calendar_week(self):
+        before = dt.datetime(2026, 11, 24, 14, 59, tzinfo=dt.timezone.utc)
+        for now, expected in ((before, ["2026-11-09", "2026-11-15"]),
+                              (before + dt.timedelta(minutes=1), ["2026-11-16", "2026-11-22"])):
+            with self.subTest(now=now), patch("bot.slack_adapter.brief_input.utc_now", return_value=now):
+                blocks = make_view("weekly", "C")["blocks"]
+                self.assertEqual([block["element"]["initial_date"] for block in blocks], expected)
+
+    def test_weekly_same_flow_confirms_only_once_and_respects_rollback(self):
+        self.prepare_weekly()
+        preview = self.submit_real("weekly", start="2026-11-14", end="2026-11-20")
+        self.briefs.ga4_fetch.assert_called_once_with("2026-11-14", "2026-11-20")
+        self.briefs.ads_fetch.assert_called_once_with("2026-11-14", "2026-11-20")
+        self.assertIn("GA4 Data API · Google Ads API", preview["text"])
+        self.assertIn("Google Ads API 조회 시각", preview["text"])
+        self.assertIn("광고 성과 비교 · 게시 가능", preview["text"])
+        self.assertEqual(preview["blocks"][-1]["elements"][0]["text"]["text"], "확인하고 게시")
+        ads_fetch = self.briefs.ads_fetch
+        self.briefs.ads_fetch = None
+        self.assertIn("사용할 수 없습니다", self.confirm_real(preview))
+        self.briefs.ads_fetch = ads_fetch
+        self.assertEqual(self.confirm_real(preview), self.confirm_real(preview))
+        self.drain()
+        self.assertIn("검색 캠페인 · 광고비 +₩700", self.performance_reply()["text"])
+
+    def test_weekly_pending_skips_reads_and_permission_failure_blocks_posting(self):
+        self.prepare_weekly()
+        before = dt.datetime(2026, 11, 22, 14, 59, tzinfo=dt.timezone.utc)
+        with patch("bot.slack_adapter.brief_input.utc_now", return_value=before):
+            preview = self.submit_real("weekly", start="2026-11-14", end="2026-11-20")
+        self.briefs.ga4_fetch.assert_not_called()
+        self.briefs.ads_fetch.assert_not_called()
+        self.assertIn("2026-11-23 00:00 (한국 시간)부터 다시 조회", preview["text"])
+        self.assertNotIn("blocks", preview)
+        self.briefs.ads_fetch.side_effect = brief_inputs.InputError("Google Ads 조회 권한을 확인해 주세요.")
+        preview = self.submit_real("weekly", start="2026-11-14", end="2026-11-20")
+        self.assertIn("조회 권한", preview["text"])
+        self.assertIn("/hermes-team brief ga4", preview["text"])
+        self.assertNotIn("blocks", preview)
 
     def test_ga4_mode_runs_existing_campaign_proposal_from_hybrid_input(self):
         dates = [f"202611{day:02}" for day in range(7, 21)]

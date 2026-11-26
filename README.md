@@ -192,3 +192,17 @@ Slack에서 `/hermes-test status`를 실행한 뒤 `keyword`, `content`, `perfor
 
 3. 대조 성공 뒤 `HERMES_GA4_ENABLED=true`로 설정하고 Slack 서비스를 재시작합니다. `/hermes-team brief ga4`에 Google Ads CSV를 첨부하면 비공개 미리보기를 받습니다. 보고 종료일이 끝난 뒤 48시간 동안에는 집계 중과 다시 조회할 수 있는 시각을 표시합니다. 이 기간이 지나면 세션 날짜가 모두 있고 API 응답에 데이터 제한이 없는 경우, 미기록일 직전 7일 안에 같은 이벤트의 양수 기록이 있는 행을 0건으로 처리합니다. 추적 기록이 없으면 확인이 필요한 것으로 표시하고 현재 보고 기간에 해당하는 경우 광고 제안을 보류합니다. 같은 기간의 GA4 이벤트 원본 CSV를 선택 첨부하면 명시된 0건을 적용하며 API와 이벤트 수가 다르면 검증을 중단합니다.
 4. 롤백할 때는 `HERMES_GA4_ENABLED=false`로 전환하고 서비스를 재시작합니다.
+
+### GA4와 Google Ads 주간 브리핑
+
+`/hermes-team brief weekly`로 날짜를 선택하고 비공개 결과를 확인한 뒤 **확인하고 게시**를 누릅니다. 기본 날짜는 한국 시간 기준 종료 후 48시간이 지난 가장 최근 월요일~일요일입니다. 광고 지표는 조회 시점에 사용 중인 기본 캠페인(실험 제외) 기준이며, 전환수는 이후 갱신될 수 있습니다.
+
+1. Hermes Google Cloud 프로젝트의 Google Ads API를 활성화하고 운영 조회용 Explorer 등급을 신청합니다. 전용 `hermes-ads-reader` 서비스 계정에 여온 광고 계정의 읽기 전용 권한을 부여합니다. 기존 AWS 인증 풀은 `hermes-staging-ssm` 역할에만 새 서비스 계정 가장을 허용합니다.
+2. EC2에 Ads 전용 WIF 구성을 `/etc/hermes/google-ads-wif.json`으로 설치합니다. 기존 GA4 인증 파일은 별도로 관리합니다. `HERMES_GOOGLE_ADS_CUSTOMER_ID`와 `HERMES_GOOGLE_ADS_CREDENTIALS`를 설정하고 Ads 기능이 꺼진 상태에서 서비스와 같은 사용자로 아래 대조를 실행합니다.
+
+   ```bash
+   python -m scripts.compare_google_ads_report --start 2026-11-14 --end 2026-11-20 --csv /path/to/report.csv
+   ```
+
+   원본 CSV는 두 주에 걸친 사용 중 캠페인의 일별 행을 포함해야 합니다. 비교 기준은 노출수·클릭수·원 단위 비용·소수 둘째 자리 전환수입니다.
+3. 일별 대조를 통과하면 `HERMES_GOOGLE_ADS_ENABLED=true`로 바꾸고 `hermes-slack` 서비스를 재시작합니다. 운영 채널에서 정상 미리보기·게시와 보류 화면을 확인합니다. 기존 GA4 API + 광고 CSV로 돌아가려면 Ads 플래그를 `false`로 바꾸고 서비스를 재시작한 뒤 `/hermes-team brief ga4`를 사용합니다.

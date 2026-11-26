@@ -42,15 +42,20 @@ STAGE_LABELS = {"queued": "대기", "failed": "실패", "completed": "완료"}
 
 def _input_summary(data: dict) -> str:
     comparison = brief_inputs.comparison_text(data)
-    ga4 = data["mode"] == "ga4"
+    weekly = data["mode"] == "weekly"
+    ga4 = data["mode"] in {"ga4", "weekly"}
     source = "GA4 Data API · " if ga4 else "GA4, "
     ads = "광고 " if ga4 else ""
     return "\n".join((
         f"출처 · {source}{data.get('ads_source', '광고 성과 보고서')}"
         + (" 및 검색어 보고서" if data["keywords"] else ""),
         f"보고 기간 · {data['start']} ~ {data['end']} ({data['timezone']})",
-        f"{ads}집계 완료 · {'확인' if data['complete'] else '미확인'}",
-        f"{ads}원본 집계 시각 · {seoul_time_label(data['collected_through']) if data['collected_through'] else '미확인'}",
+        *(["집계 · 브리핑 기준 충족 · 사용 중 캠페인 (실험 제외)",
+           f"Google Ads API 조회 시각 · {seoul_time_label(data['ads_fetched_at'])}",
+           "광고 전환수는 조회 이후에도 갱신될 수 있습니다."] if weekly else [
+           f"{ads}집계 완료 · {'확인' if data['complete'] else '미확인'}",
+           f"{ads}원본 집계 시각 · {seoul_time_label(data['collected_through']) if data['collected_through'] else '미확인'}",
+        ]),
         *([f"GA4 API 조회 시각 · {seoul_time_label(data['ga4_fetched_at'])}",
            "GA4 원본 집계 완료 시각 · 미확인"] if ga4 else []),
         *([f"GA4 이벤트 원본 CSV · 0건 확인 행 {data['ga4_verified_zeros']}개 보완"]
@@ -275,14 +280,19 @@ class SlackTeamBriefs(SlackApprovalCards):
 
     def __init__(
         self, mapping, db_path, channel_id, *, approval_mode,
-        keyword_approval_mode=workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT, ga4_fetch=None,
+        keyword_approval_mode=workflow.KeywordApprovalMode.LEGAL_BEFORE_DRAFT, ga4_fetch=None, ads_fetch=None,
     ):
         super().__init__(mapping, db_path)
         self.ga4_fetch = ga4_fetch
+        self.ads_fetch = ads_fetch
         self.team = TeamBriefs(
             db_path, mapping.workspace_id, channel_id, approval_mode,
             keyword_approval_mode=keyword_approval_mode,
         )
+
+    @property
+    def weekly_enabled(self):
+        return self.ga4_fetch is not None and self.ads_fetch is not None
 
     def _actor(self, team_id, channel_id, user_id):
         if channel_id != self.team.channel_id:
@@ -373,6 +383,10 @@ class SlackTeamBriefs(SlackApprovalCards):
         if words == ["brief", "ga4"] and self.ga4_fetch is None:
             respond(response_type="ephemeral", text="GA4 API 입력이 비활성화되어 있습니다. /hermes-team brief csv를 사용해 주세요.")
             return
+        if words == ["brief", "weekly"] and not self.weekly_enabled:
+            fallback = brief_input.WEEKLY_FALLBACK if self.ga4_fetch else "/hermes-team brief csv를 사용해 주세요."
+            respond(response_type="ephemeral", text=f"주간 API 브리핑 연결을 사용할 수 없습니다. {fallback}")
+            return
         if len(words) == 2 and words[0] == "brief" and words[1] in brief_input.MODES:
             try:
                 client.views_open(trigger_id=command["trigger_id"], view=brief_input.make_view(words[1], command["channel_id"]))
@@ -384,7 +398,8 @@ class SlackTeamBriefs(SlackApprovalCards):
         if words != ["brief"] and (len(words) != 2 or words[0] != "brief" or words[1] not in BRIEF_SCENARIOS):
             scenarios = "|".join(BRIEF_SCENARIOS)
             ga4 = "|ga4" if self.ga4_fetch is not None else ""
-            respond(response_type="ephemeral", text=f"/hermes-team brief [csv|text{ga4}|{scenarios}]")
+            weekly = "|weekly" if self.weekly_enabled else ""
+            respond(response_type="ephemeral", text=f"/hermes-team brief [csv|text{ga4}{weekly}|{scenarios}]")
             return
         scenario = words[-1] if len(words) == 2 else "normal"
         try:
@@ -413,21 +428,28 @@ class SlackTeamBriefs(SlackApprovalCards):
 
         blocks = None
         try:
-            data = brief_input.read_view(client, view, user, mode, ga4_fetch=self.ga4_fetch)
+            data = brief_input.read_view(client, view, user, mode, ga4_fetch=self.ga4_fetch, ads_fetch=self.ads_fetch)
             data = self.team.save_input(input_id, actor.actor_id, data)
             issue = brief_inputs.hold_reason(data)
             text = f"{brief_input.MODES[mode]} 검증\n{_input_summary(data)}"
             if issue:
                 text += f"\n광고 분석 보류 · {issue}"
+            elif mode == "weekly":
+                text += "\n광고 성과 비교 · 게시 가능"
             if not data["keywords"]:
                 text += "\n키워드 분석 대기 · 검색어 보고서 필요"
             text += "\n아래에서 30분 내 확인하면 PM 브리핑을 시작합니다."
             blocks = [_section(text), {"type": "actions", "elements": [{
                 "type": "button", "action_id": brief_input.CONFIRM, "value": input_id,
-                "text": {"type": "plain_text", "text": "확인하고 브리핑 시작"}, "style": "primary",
+                "text": {"type": "plain_text", "text": "확인하고 게시" if mode == "weekly" else "확인하고 브리핑 시작"},
+                "style": "primary",
             }]}]
         except brief_inputs.InputError as exc:
-            text = f"{exc}\n/hermes-team brief {mode}에서 수정해 다시 제출해 주세요."
+            if mode == "weekly":
+                fallback = brief_input.WEEKLY_FALLBACK if self.ga4_fetch else "/hermes-team brief csv를 사용해 주세요."
+                text = f"{exc}\n{fallback}"
+            else:
+                text = f"{exc}\n/hermes-team brief {mode}에서 수정해 다시 제출해 주세요."
         except (sqlite3.Error, workflow.NotFoundError, KeyError, ValueError, TypeError) as exc:
             LOGGER.warning("Brief input failed error_type=%s", type(exc).__name__)
             text = "검증을 완료하지 못했습니다. 잠시 후 다시 제출해 주세요."
@@ -445,6 +467,7 @@ class SlackTeamBriefs(SlackApprovalCards):
                 raise workflow.AuthorizationError("team brief request role is missing")
             brief_id = self.team.confirm_input(
                 str(uuid.UUID(action["value"])), actor.actor_id, allow_ga4=self.ga4_fetch is not None,
+                allow_weekly=self.weekly_enabled,
             )
             text = f"실제 데이터 브리핑을 접수했습니다. 결과는 이 채널의 PM 스레드에 게시합니다. · {brief_id}"
         except brief_inputs.InputError as exc:

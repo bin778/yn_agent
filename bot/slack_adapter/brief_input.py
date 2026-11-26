@@ -1,19 +1,24 @@
 """Slack input views and private CSV retrieval for real-data team briefs."""
 
+import datetime as dt
 import json
 import uuid
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from zoneinfo import ZoneInfo
 
 from slack_sdk.errors import SlackClientError
 
-from ..brief_inputs import FIELDS, InputError, normalize
+from ..brief_inputs import FIELDS, InputError, ga4_ready_at, hold_reason, normalize
+from ..db import utc_now
+from ..google_ads_reports import weekly_period
 from ..ga4_reports import TIMEZONE
 
 MODAL = "hermes_team_real_input"
 CONFIRM = "hermes_team_real_confirm"
-MODES = {"csv": "실제 집계 CSV", "text": "직접 입력", "ga4": "GA4 API 브리핑"}
+MODES = {"csv": "실제 집계 CSV", "text": "직접 입력", "ga4": "GA4 API 브리핑", "weekly": "주간 API 브리핑"}
+WEEKLY_FALLBACK = "/hermes-team brief ga4에서 Google Ads CSV로 브리핑할 수 있습니다."
 MAX_CSV_BYTES = 1024 * 1024
 
 
@@ -29,7 +34,25 @@ def _input(key, label, element, *, optional=False, hint=None):
     }
 
 
+def _modal(mode, channel, blocks, submit):
+    return {
+        "type": "modal", "callback_id": MODAL, "title": _plain(MODES[mode]),
+        "submit": _plain(submit), "close": _plain("닫기"), "blocks": blocks,
+        "private_metadata": json.dumps({"mode": mode, "channel": channel, "id": str(uuid.uuid4())}),
+    }
+
+
 def make_view(mode, channel):
+    if mode == "weekly":
+        today = utc_now().astimezone(ZoneInfo(TIMEZONE)).date()
+        ready_day = today - dt.timedelta(days=3)
+        last = ready_day - dt.timedelta(days=(ready_day.weekday() + 1) % 7)
+        first = last - dt.timedelta(days=6)
+        return _modal(mode, channel, [
+            _input("start", "보고 시작일", {"type": "datepicker", "initial_date": first.isoformat()}),
+            _input("end", "보고 종료일", {"type": "datepicker", "initial_date": last.isoformat()},
+                   hint="7일을 선택하면 직전 7일과 비교합니다."),
+        ], "브리핑 미리보기")
     ga4 = mode == "ga4"
     options = [{"text": _plain(label), "value": value} for value, label in (
         ("unknown", "미확인"), ("complete", "광고 집계 완료 확인" if ga4 else "두 출처 모두 집계 완료 확인"),
@@ -79,11 +102,7 @@ def make_view(mode, channel):
         if key != "keywords":
             hint += " · 7일 비교에는 직전 7일도 같은 보고서에 포함"
         blocks.append(_input(key, label, element, optional=key == "keywords", hint=hint))
-    return {
-        "type": "modal", "callback_id": MODAL, "title": _plain(MODES[mode]),
-        "submit": _plain("검증하기"), "close": _plain("닫기"), "blocks": blocks,
-        "private_metadata": json.dumps({"mode": mode, "channel": channel, "id": str(uuid.uuid4())}),
-    }
+    return _modal(mode, channel, blocks, "검증하기")
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -116,12 +135,43 @@ def _download_csv(client, file_id, user):
             raise InputError("CSV를 UTF-8로 저장해 다시 첨부해 주세요.") from None
 
 
-def read_view(client, view, user, mode, *, ga4_fetch=None):
+def _weekly(start, end, ga4_fetch, ads_fetch):
+    if ga4_fetch is None or ads_fetch is None:
+        raise InputError("주간 API 브리핑 연결을 사용할 수 없습니다.")
+    _, last = weekly_period(start, end)
+    now = utc_now()
+    if last > now.astimezone(ZoneInfo(TIMEZONE)).date():
+        raise InputError("보고 종료일은 한국 시간 기준 오늘까지 선택할 수 있습니다.")
+    ready = ga4_ready_at(last, TIMEZONE)
+    if now < ready:
+        raise InputError(f"GA4·Google Ads 집계 대기 · {ready:%Y-%m-%d %H:%M} (한국 시간)부터 다시 조회해 주세요.")
+    ga4_report = ga4_fetch(start, end).with_inferred_zeros()
+    ads_report = ads_fetch(start, end)
+    data = normalize(
+        {**ga4_report.tables(), "ads": ads_report.table()}, start=start, end=end,
+        ga_timezone=TIMEZONE, ads_timezone=TIMEZONE, complete=True, mode="weekly",
+        ads_source="Google Ads API", ga4_report=ga4_report,
+    )
+    comparison = data["comparison"]
+    issue = hold_reason(data) or comparison.get("reason")
+    if issue:
+        raise InputError(issue)
+    if any(comparison["previous"][key] is None for key in ("form_submit", "home_kakao_click")):
+        raise InputError("GA4 직전 주 이벤트의 수집 상태를 확인해 주세요.")
+    data["ads_fetched_at"] = ads_report.fetched_at
+    return data
+
+
+def read_view(client, view, user, mode, *, ga4_fetch=None, ads_fetch=None):
     values = view["state"]["values"]
 
     def state(key):
         return values.get(key, {}).get(key, {})
 
+    start = state("start").get("selected_date") or ""
+    end = state("end").get("selected_date") or ""
+    if mode == "weekly":
+        return _weekly(start, end, ga4_fetch, ads_fetch)
     ga4 = mode == "ga4"
     if ga4 and ga4_fetch is None:
         raise InputError("GA4 API 입력이 비활성화되어 있습니다.")
@@ -149,8 +199,6 @@ def read_view(client, view, user, mode, *, ga4_fetch=None):
             tables[key] = content
         elif key != "keywords" and not (ga4 and key == "events"):
             raise InputError(f"{label} 자료를 제출해 주세요.")
-    start = state("start").get("selected_date") or ""
-    end = state("end").get("selected_date") or ""
     report = None
     if ga4:
         report = ga4_fetch(start, end)

@@ -316,7 +316,7 @@ def comparison_text(data: dict) -> str:
     for key, label, prefix, suffix in COMPARISON_METRICS:
         previous = comparison["previous"][key]
         if previous is None:
-            reason = "직전 기간 추적 확인 필요" if data.get("mode") == "ga4" else "직전 기간 일별 행 누락"
+            reason = "직전 기간 추적 확인 필요" if data.get("mode") in {"ga4", "weekly"} else "직전 기간 일별 행 누락"
             lines.append(f"{label} · 비교 보류 ({reason})")
             continue
         before, current = Decimal(previous), Decimal(data[key])
@@ -335,7 +335,7 @@ def hold_reason(data: dict) -> str | None:
     if not data["complete"]:
         return "집계 완료가 미확인입니다."
     if data["warnings"]:
-        if data["mode"] == "ga4":
+        if data["mode"] in {"ga4", "weekly"}:
             return ("GA4 추적 확인 필요 · 이벤트 수집 상태를 확인해 주세요. "
                     "원본 GA4 이벤트 CSV에서 0건을 확인할 수 있으면 첨부해 주세요.")
         return "GA4 필수 이벤트의 일별 행이 빠져 있습니다. 유효한 0건은 숫자 0으로 입력해 주세요."
@@ -347,9 +347,9 @@ def summary_text(data: dict) -> str:
         value = data[event]
         if data.get("ga4_pending"):
             return "집계 중"
-        if data.get("mode") == "ga4" and (event in data.get("ga4_incomplete_events", ()) or value is None):
+        if data.get("mode") in {"ga4", "weekly"} and (event in data.get("ga4_incomplete_events", ()) or value is None):
             return "추적 확인 필요"
-        unit = "건" if event == "form_submit" and data.get("mode") == "ga4" else "회"
+        unit = "건" if event == "form_submit" and data.get("mode") in {"ga4", "weekly"} else "회"
         return f"{value:,}{unit}" if value is not None else "기록 행 없음"
 
     return (
